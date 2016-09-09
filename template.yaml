@@ -46,6 +46,7 @@ objects:
     - deploymentconfigs
     - resourcequotas
     verbs:
+    - watch
     - get
     - list
     - create
@@ -104,10 +105,10 @@ objects:
           - name: EXCLUDE_NAMESPACES
             value: ${EXCLUDE_NAMESPACES}
           command:
-          - /usr/bin/force-sleep
-          - -q $(QUOTA_HOURS)
-          - -p $(PERIOD)
-          - -s $(SYNC_PERIOD)
-          - -z $(PROJECT_SLEEP_LENGTH)
-          - -w $(WORKERS)
-          - -n $(EXCLUDE_NAMESPACES)
+          - /go/bin/force-sleep
+          - -q=$(QUOTA_HOURS)
+          - -p=$(PERIOD)
+          - -s=$(SYNC_PERIOD)
+          - -z=$(PROJECT_SLEEP_LENGTH)
+          - -w=$(WORKERS)
+          - -n=$(EXCLUDE_NAMESPACES)

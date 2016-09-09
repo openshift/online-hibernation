@@ -1,0 +1,742 @@
+package forcesleep
+
+import (
+	"log"
+	"os"
+	"testing"
+	"time"
+
+	"github.com/openshift/origin/pkg/client/testclient"
+	deployapi "github.com/openshift/origin/pkg/deploy/api"
+
+	kapi "k8s.io/kubernetes/pkg/api"
+	"k8s.io/kubernetes/pkg/api/meta"
+	"k8s.io/kubernetes/pkg/api/resource"
+	"k8s.io/kubernetes/pkg/api/unversioned"
+	ktestclient "k8s.io/kubernetes/pkg/client/unversioned/testclient"
+	"k8s.io/kubernetes/pkg/runtime"
+	"k8s.io/kubernetes/pkg/types"
+)
+
+type action struct {
+	Verb     string
+	Resource string
+	Name     string
+}
+
+func init() {
+	log.SetOutput(os.Stdout)
+}
+
+func TestSyncProject(t *testing.T) {
+	tests := map[string]struct {
+		Quota                    string
+		Period                   string
+		ProjectSleepPeriod       string
+		Projects                 []string
+		DeploymentConfigs        []*deployapi.DeploymentConfig
+		Pods                     []*kapi.Pod
+		ReplicationControllers   []*kapi.ReplicationController
+		ResourceQuotas           []*kapi.ResourceQuota
+		Resources                []*ResourceObject
+		ExpectedOpenshiftActions []action
+		ExpectedKubeActions      []action
+	}{
+		"Apply force-sleep to project over quota-hours": {
+			Quota:              "16h",
+			Period:             "24h",
+			ProjectSleepPeriod: "8h",
+			Projects:           []string{"test"},
+			ResourceQuotas: []*kapi.ResourceQuota{
+				quota("compute-resources", "test", "1G", "1"),
+			},
+			Pods: []*kapi.Pod{
+				pod("pod1", "test"),
+			},
+			ReplicationControllers: []*kapi.ReplicationController{
+				rc("rc1", "test"),
+			},
+			DeploymentConfigs: []*deployapi.DeploymentConfig{
+				dc("dc1", "test"),
+			},
+			Resources: []*ResourceObject{
+				projectResource("test", time.Time{}, time.Time{}),
+				rcResource("rc1", "rc1", "test", "1", "dc1", []*RunningTime{
+					runningTime(time.Now().Add(-16*time.Hour), time.Time{}),
+				}),
+				podResource("pod1", "pod1", "test", "1",
+					resource.MustParse("1G"),
+					[]*RunningTime{
+						runningTime(time.Now().Add(-16*time.Hour), time.Time{}),
+					}),
+			},
+			ExpectedOpenshiftActions: []action{
+				{Verb: "get", Resource: "deploymentconfigs", Name: "dc1"},
+				{Verb: "update", Resource: "deploymentconfigs"},
+			},
+			ExpectedKubeActions: []action{
+				{Verb: "get", Resource: "resourcequotas", Name: "compute-resources"},
+				{Verb: "create", Resource: "resourcequotas", Name: "force-sleep"},
+				{Verb: "list", Resource: "pods"},
+				{Verb: "delete", Resource: "pods", Name: "pod1"},
+				{Verb: "get", Resource: "replicationcontrollers", Name: "rc1"},
+				{Verb: "update", Resource: "replicationcontrollers"},
+			},
+		},
+
+		"Remove force-sleep from project that has slept for its time": {
+			Quota:              "16h",
+			Period:             "24h",
+			ProjectSleepPeriod: "8h",
+			Projects:           []string{"test"},
+			ResourceQuotas: []*kapi.ResourceQuota{
+				quota("compute-resources", "test", "1G", "1"),
+				quota("force-sleep", "test", "1G", "0"),
+			},
+			Pods: []*kapi.Pod{},
+			ReplicationControllers: []*kapi.ReplicationController{
+				rc("rc1", "test"),
+			},
+			DeploymentConfigs: []*deployapi.DeploymentConfig{
+				dc("dc1", "test"),
+			},
+			Resources: []*ResourceObject{
+				projectResource("test", time.Now(), time.Now().Add(-8*time.Hour)),
+				rcResource("rc1", "rc1", "test", "1", "dc1", []*RunningTime{
+					runningTime(time.Now().Add(-24*time.Hour),
+						time.Now().Add(-8*time.Hour)),
+				}),
+			},
+			ExpectedOpenshiftActions: []action{},
+			ExpectedKubeActions: []action{
+				{Verb: "delete", Resource: "resourcequotas", Name: "force-sleep"},
+			},
+		},
+
+		"Do not remove force-sleep from project that hasn't slept for its time": {
+			Quota:              "16h",
+			Period:             "24h",
+			ProjectSleepPeriod: "8h",
+			Projects:           []string{"test"},
+			ResourceQuotas: []*kapi.ResourceQuota{
+				quota("compute-resources", "test", "1G", "1"),
+				quota("force-sleep", "test", "1G", "0"),
+			},
+			Pods: []*kapi.Pod{},
+			ReplicationControllers: []*kapi.ReplicationController{
+				rc("rc1", "test"),
+			},
+			DeploymentConfigs: []*deployapi.DeploymentConfig{
+				dc("dc1", "test"),
+			},
+			Resources: []*ResourceObject{
+				projectResource("test", time.Now().Add(4*time.Hour), time.Now().Add(-4*time.Hour)),
+				rcResource("rc1", "rc1", "test", "1", "dc1", []*RunningTime{
+					runningTime(time.Now().Add(-20*time.Hour),
+						time.Now().Add(-4*time.Hour)),
+				}),
+			},
+			ExpectedOpenshiftActions: []action{
+				{Verb: "get", Resource: "deploymentconfigs", Name: "dc1"},
+				{Verb: "update", Resource: "deploymentconfigs"},
+			},
+			ExpectedKubeActions: []action{
+				{Verb: "get", Resource: "replicationcontrollers", Name: "rc1"},
+				{Verb: "update", Resource: "replicationcontrollers"},
+			},
+		},
+
+		"Apply force-sleep to project with multiple pods": {
+			Quota:              "16h",
+			Period:             "24h",
+			ProjectSleepPeriod: "8h",
+			Projects:           []string{"test"},
+			ResourceQuotas: []*kapi.ResourceQuota{
+				quota("compute-resources", "test", "1G", "2"),
+			},
+			Pods: []*kapi.Pod{
+				pod("pod1", "test"),
+				pod("pod2", "test"),
+			},
+			ReplicationControllers: []*kapi.ReplicationController{
+				rc("rc1", "test"),
+			},
+			DeploymentConfigs: []*deployapi.DeploymentConfig{
+				dc("dc1", "test"),
+			},
+			Resources: []*ResourceObject{
+				projectResource("test", time.Time{}, time.Time{}),
+				rcResource("rc1", "rc1", "test", "1", "dc1", []*RunningTime{
+					runningTime(time.Now().Add(-16*time.Hour),
+						time.Time{}),
+				}),
+				podResource("pod2", "pod2", "test", "1",
+					resource.MustParse("500M"),
+					[]*RunningTime{
+						runningTime(time.Now().Add(-16*time.Hour), time.Time{}),
+					}),
+				podResource("pod1", "pod1", "test", "1",
+					resource.MustParse("500M"),
+					[]*RunningTime{
+						runningTime(time.Now().Add(-16*time.Hour), time.Time{}),
+					}),
+			},
+			ExpectedOpenshiftActions: []action{
+				{Verb: "get", Resource: "deploymentconfigs", Name: "dc1"},
+				{Verb: "update", Resource: "deploymentconfigs"},
+			},
+			ExpectedKubeActions: []action{
+				{Verb: "delete", Resource: "pods", Name: "pod1"},
+				{Verb: "delete", Resource: "pods", Name: "pod2"},
+				{Verb: "get", Resource: "resourcequotas", Name: "compute-resources"},
+				{Verb: "create", Resource: "resourcequotas", Name: "force-sleep"},
+				{Verb: "list", Resource: "pods"},
+				{Verb: "get", Resource: "replicationcontrollers", Name: "rc1"},
+				{Verb: "update", Resource: "replicationcontrollers"},
+			},
+		},
+
+		"Do not apply force-sleep to a project that doesn't need it": {
+			Quota:              "16h",
+			Period:             "24h",
+			ProjectSleepPeriod: "8h",
+			Projects:           []string{"test"},
+			ResourceQuotas: []*kapi.ResourceQuota{
+				quota("compute-resources", "test", "1G", "2"),
+			},
+			Pods: []*kapi.Pod{
+				pod("pod1", "test"),
+			},
+			ReplicationControllers: []*kapi.ReplicationController{
+				rc("rc1", "test"),
+			},
+			DeploymentConfigs: []*deployapi.DeploymentConfig{
+				dc("dc1", "test"),
+			},
+			Resources: []*ResourceObject{
+				projectResource("test", time.Time{}, time.Time{}),
+				rcResource("rc1", "rc1", "test", "1", "dc1", []*RunningTime{
+					runningTime(time.Now().Add(-8*time.Hour),
+						time.Time{}),
+				}),
+				podResource("pod1", "pod1", "test", "1",
+					resource.MustParse("500M"),
+					[]*RunningTime{
+						runningTime(time.Now().Add(-8*time.Hour), time.Time{}),
+					}),
+			},
+			ExpectedOpenshiftActions: []action{},
+			ExpectedKubeActions: []action{
+				{Verb: "get", Resource: "resourcequotas", Name: "compute-resources"},
+			},
+		},
+
+		"Do not apply force-sleep if memory quota has not been exceeded": {
+			Quota:              "16h",
+			Period:             "24h",
+			ProjectSleepPeriod: "8h",
+			Projects:           []string{"test"},
+			ResourceQuotas: []*kapi.ResourceQuota{
+				quota("compute-resources", "test", "1G", "2"),
+			},
+			Pods: []*kapi.Pod{},
+			ReplicationControllers: []*kapi.ReplicationController{
+				rc("rc1", "test"),
+			},
+			DeploymentConfigs: []*deployapi.DeploymentConfig{
+				dc("dc1", "test"),
+			},
+			Resources: []*ResourceObject{
+				projectResource("test", time.Time{}, time.Time{}),
+				rcResource("rc1", "rc1", "test", "1", "dc1", []*RunningTime{
+					runningTime(time.Now().Add(-16*time.Hour),
+						time.Now().Add(-8*time.Hour)),
+				}),
+			},
+			ExpectedOpenshiftActions: []action{},
+			ExpectedKubeActions:      []action{},
+		},
+
+		"Scale an RC that has been active for quota limit": {
+			Quota:              "16h",
+			Period:             "24h",
+			ProjectSleepPeriod: "8h",
+			Projects:           []string{"test"},
+			ResourceQuotas: []*kapi.ResourceQuota{
+				quota("compute-resources", "test", "1G", "1"),
+			},
+			Pods: []*kapi.Pod{
+				pod("pod1", "test"),
+			},
+			ReplicationControllers: []*kapi.ReplicationController{
+				rc("rc1", "test"),
+			},
+			DeploymentConfigs: []*deployapi.DeploymentConfig{
+				dc("dc1", "test"),
+			},
+			Resources: []*ResourceObject{
+				projectResource("test", time.Time{}, time.Time{}),
+				rcResource("rc1", "rc1", "test", "1", "dc1", []*RunningTime{
+					runningTime(time.Now().Add(-16*time.Hour),
+						time.Time{}),
+				}),
+				podResource("pod1", "pod1", "test", "1",
+					resource.MustParse("1M"),
+					[]*RunningTime{
+						runningTime(time.Now().Add(-16*time.Hour), time.Time{}),
+					}),
+			},
+			ExpectedOpenshiftActions: []action{
+				{Verb: "get", Resource: "deploymentconfigs", Name: "dc1"},
+				{Verb: "update", Resource: "deploymentconfigs"},
+			},
+			ExpectedKubeActions: []action{
+				{Verb: "get", Resource: "resourcequotas", Name: "compute-resources"},
+				{Verb: "get", Resource: "replicationcontrollers", Name: "rc1"},
+				{Verb: "update", Resource: "replicationcontrollers"},
+			},
+		},
+
+		"Scale DC that exceeds running limit (due to multiple active RCs)": {
+			Quota:              "16h",
+			Period:             "24h",
+			ProjectSleepPeriod: "8h",
+			Projects:           []string{"test"},
+			ResourceQuotas: []*kapi.ResourceQuota{
+				quota("compute-resources", "test", "1G", "2"),
+			},
+			Pods: []*kapi.Pod{
+				pod("pod1", "test"),
+				pod("pod2", "test"),
+			},
+			ReplicationControllers: []*kapi.ReplicationController{
+				rc("rc1", "test"),
+				rc("rc2", "test"),
+			},
+			DeploymentConfigs: []*deployapi.DeploymentConfig{
+				dc("dc1", "test"),
+			},
+			Resources: []*ResourceObject{
+				projectResource("test", time.Time{}, time.Time{}),
+				rcResource("rc1", "rc1", "test", "1", "dc1", []*RunningTime{
+					runningTime(time.Now().Add(-8*time.Hour),
+						time.Time{}),
+				}),
+				rcResource("rc2", "rc2", "test", "1", "dc1", []*RunningTime{
+					runningTime(time.Now().Add(-8*time.Hour),
+						time.Time{}),
+				}),
+				podResource("pod1", "pod1", "test", "1",
+					resource.MustParse("1M"),
+					[]*RunningTime{
+						runningTime(time.Now().Add(-16*time.Hour), time.Time{}),
+					}),
+			},
+			ExpectedOpenshiftActions: []action{
+				{Verb: "get", Resource: "deploymentconfigs", Name: "dc1"},
+				{Verb: "update", Resource: "deploymentconfigs"},
+			},
+			ExpectedKubeActions: []action{
+				{Verb: "get", Resource: "resourcequotas", Name: "compute-resources"},
+			},
+		},
+	}
+
+	for name, test := range tests {
+		t.Logf("Testing: %s", name)
+
+		quota, err := time.ParseDuration(test.Quota)
+		if err != nil {
+			t.Logf("Error: %s", err)
+		}
+		period, err := time.ParseDuration(test.Period)
+		if err != nil {
+			t.Logf("Error: %s", err)
+		}
+		projectSleepPeriod, err := time.ParseDuration(test.ProjectSleepPeriod)
+		if err != nil {
+			t.Logf("Error: %s", err)
+		}
+
+		config := &SleeperConfig{
+			Quota:              quota,
+			Period:             period,
+			ProjectSleepPeriod: projectSleepPeriod,
+		}
+		kc := &ktestclient.Fake{}
+		kc.AddReactor("list", "resourcequotas", func(action ktestclient.Action) (handled bool, ret runtime.Object, err error) {
+			list := &kapi.ResourceQuotaList{}
+			for i := range test.ResourceQuotas {
+				list.Items = append(list.Items, *test.ResourceQuotas[i])
+			}
+			return true, list, nil
+		})
+		kc.AddReactor("get", "resourcequotas", func(action ktestclient.Action) (handled bool, ret runtime.Object, err error) {
+			for i := range test.ResourceQuotas {
+				if test.ResourceQuotas[i].Name == action.(ktestclient.GetAction).GetName() {
+					return true, test.ResourceQuotas[i], nil
+				}
+			}
+			return true, nil, nil
+		})
+		kc.AddReactor("list", "pods", func(action ktestclient.Action) (handled bool, ret runtime.Object, err error) {
+			list := &kapi.PodList{}
+			for i := range test.Pods {
+				list.Items = append(list.Items, *test.Pods[i])
+			}
+			return true, list, nil
+		})
+		kc.AddReactor("list", "replicationcontrollers", func(action ktestclient.Action) (handled bool, ret runtime.Object, err error) {
+			list := &kapi.ReplicationControllerList{}
+			for i := range test.ReplicationControllers {
+				list.Items = append(list.Items, *test.ReplicationControllers[i])
+			}
+			return true, list, nil
+		})
+
+		oc := &testclient.Fake{}
+		oc.AddReactor("list", "deploymentconfigs", func(action ktestclient.Action) (handled bool, ret runtime.Object, err error) {
+			list := &deployapi.DeploymentConfigList{}
+			for i := range test.DeploymentConfigs {
+				list.Items = append(list.Items, *test.DeploymentConfigs[i])
+			}
+			return true, list, nil
+		})
+
+		s := NewSleeper(oc, kc, config)
+
+		for _, resource := range test.Resources {
+			s.resources.Add(resource)
+		}
+
+		for _, project := range test.Projects {
+			s.SyncProject(project)
+		}
+
+		// Test kubeClient actions
+		for _, action := range kc.Actions() {
+			switch a := action.(type) {
+			case ktestclient.ListActionImpl:
+			case ktestclient.UpdateActionImpl:
+				found := false
+				for _, e := range test.ExpectedKubeActions {
+					if e.Verb != a.GetVerb() {
+						continue
+					}
+					if e.Resource == a.GetResource() {
+						found = true
+						break
+					}
+				}
+				if !found {
+					t.Fatalf("unexpected action: %#v", action)
+				}
+
+			case ktestclient.CreateActionImpl:
+				accessor, _ := meta.Accessor(a.GetObject())
+				found := false
+				for _, e := range test.ExpectedKubeActions {
+					if e.Verb != a.GetVerb() {
+						continue
+					}
+					if e.Resource == a.GetResource() && e.Name == accessor.GetName() {
+						found = true
+						break
+					}
+				}
+				if !found {
+					t.Fatalf("unexpected action (name=%s): %#v", accessor.GetName(), action)
+				}
+
+			case ktestclient.DeleteActionImpl:
+				found := false
+				for _, e := range test.ExpectedKubeActions {
+					if e.Verb != a.GetVerb() {
+						continue
+					}
+					if e.Resource == a.GetResource() && e.Name == a.GetName() {
+						found = true
+						break
+					}
+				}
+				if !found {
+					t.Fatalf("unexpected action (name=%s): %#v", a.GetName(), action)
+				}
+
+			case ktestclient.GetActionImpl:
+				found := false
+				for _, e := range test.ExpectedKubeActions {
+					if e.Verb != a.GetVerb() {
+						continue
+					}
+					if e.Resource == a.GetResource() && e.Name == a.GetName() {
+						found = true
+						break
+					}
+				}
+				if !found {
+					t.Fatalf("unexpected action (name=%s): %#v", a.GetName(), action)
+				}
+
+			default:
+				t.Fatalf("unexpected action: %#v", action)
+			}
+		}
+
+		// Test osClient actions
+		for _, action := range oc.Actions() {
+			switch a := action.(type) {
+			case ktestclient.ListActionImpl:
+			case ktestclient.UpdateActionImpl:
+				found := false
+				for _, e := range test.ExpectedOpenshiftActions {
+					if e.Verb != a.GetVerb() {
+						continue
+					}
+					if e.Resource == a.GetResource() {
+						found = true
+						break
+					}
+				}
+				if !found {
+					t.Fatalf("unexpected action: %#v", action)
+				}
+
+			case ktestclient.CreateActionImpl:
+				accessor, _ := meta.Accessor(a.GetObject())
+				found := false
+				for _, e := range test.ExpectedOpenshiftActions {
+					if e.Verb != a.GetVerb() {
+						continue
+					}
+					if e.Resource == a.GetResource() && e.Name == accessor.GetName() {
+						found = true
+						break
+					}
+				}
+				if !found {
+					t.Fatalf("unexpected action (name=%s): %#v", accessor.GetName(), action)
+				}
+
+			case ktestclient.DeleteActionImpl:
+				found := false
+				for _, e := range test.ExpectedOpenshiftActions {
+					if e.Verb != a.GetVerb() {
+						continue
+					}
+					if e.Resource == a.GetResource() && e.Name == a.GetName() {
+						found = true
+						break
+					}
+				}
+				if !found {
+					t.Fatalf("unexpected action (name=%s): %#v", a.GetName(), action)
+				}
+
+			case ktestclient.GetActionImpl:
+				found := false
+				for _, e := range test.ExpectedOpenshiftActions {
+					if e.Verb != a.GetVerb() {
+						continue
+					}
+					if e.Resource == a.GetResource() && e.Name == a.GetName() {
+						found = true
+						break
+					}
+				}
+				if !found {
+					t.Fatalf("unexpected action (name=%s): %#v", a.GetName(), action)
+				}
+
+			default:
+				t.Fatalf("unexpected action: %#v", action)
+			}
+		}
+
+		// Check for missing expected actions
+		for _, e := range test.ExpectedOpenshiftActions {
+			found := false
+			for _, action := range oc.Actions() {
+				if action.GetVerb() != e.Verb {
+					continue
+				}
+				if action.GetResource() != e.Resource {
+					continue
+				}
+				switch a := action.(type) {
+				case ktestclient.ListActionImpl:
+					if e.Verb == action.GetVerb() && e.Resource == action.GetResource() {
+						found = true
+					}
+				case ktestclient.UpdateActionImpl:
+					if e.Verb == action.GetVerb() && e.Resource == action.GetResource() {
+						found = true
+					}
+				case ktestclient.CreateActionImpl:
+					accessor, _ := meta.Accessor(a.GetObject())
+					if e.Name == accessor.GetName() {
+						found = true
+					}
+				case ktestclient.GetActionImpl:
+					if e.Name == a.GetName() {
+						found = true
+					}
+				case ktestclient.DeleteActionImpl:
+					if e.Name == a.GetName() {
+						found = true
+					}
+				default:
+				}
+			}
+			if !found {
+				t.Logf("expected but didn't observe OpenShift action: %#v", e)
+				t.Logf("observed OpenShift actions:")
+				for _, a := range oc.Actions() {
+					t.Logf("%#v", a)
+				}
+				t.FailNow()
+			}
+		}
+
+		for _, e := range test.ExpectedKubeActions {
+			found := false
+			for _, action := range kc.Actions() {
+				if action.GetVerb() != e.Verb {
+					continue
+				}
+				if action.GetResource() != e.Resource {
+					continue
+				}
+				switch a := action.(type) {
+				case ktestclient.ListActionImpl:
+					if e.Verb == action.GetVerb() && e.Resource == action.GetResource() {
+						found = true
+					}
+				case ktestclient.CreateActionImpl:
+					accessor, _ := meta.Accessor(a.GetObject())
+					if e.Name == accessor.GetName() {
+						found = true
+					}
+				case ktestclient.UpdateActionImpl:
+					if e.Verb == action.GetVerb() && e.Resource == action.GetResource() {
+						found = true
+					}
+				case ktestclient.GetActionImpl:
+					if e.Name == a.GetName() {
+						found = true
+					}
+				case ktestclient.DeleteActionImpl:
+					if e.Name == a.GetName() {
+						found = true
+					}
+				default:
+				}
+			}
+			if !found {
+				t.Logf("expected but didn't observe Kubernetes action: %#v", e)
+				t.Logf("observed Kubernetes actions:")
+				for _, a := range kc.Actions() {
+					t.Logf("%#v", a)
+				}
+				t.FailNow()
+			}
+		}
+	}
+}
+
+func pod(name, namespace string) *kapi.Pod {
+	return &kapi.Pod{
+		TypeMeta: unversioned.TypeMeta{
+			Kind: "pods",
+		},
+		ObjectMeta: kapi.ObjectMeta{
+			Name:      name,
+			Namespace: namespace,
+		},
+	}
+}
+
+func rc(name, namespace string) *kapi.ReplicationController {
+	return &kapi.ReplicationController{
+		TypeMeta: unversioned.TypeMeta{
+			Kind: "replicationcontrollers",
+		},
+		ObjectMeta: kapi.ObjectMeta{
+			Name:      name,
+			Namespace: namespace,
+		},
+	}
+}
+
+func dc(name, namespace string) *deployapi.DeploymentConfig {
+	return &deployapi.DeploymentConfig{
+		TypeMeta: unversioned.TypeMeta{
+			Kind: "replicationcontrollers",
+		},
+		ObjectMeta: kapi.ObjectMeta{
+			Name:      name,
+			Namespace: namespace,
+		},
+	}
+}
+
+func quota(name, namespace, memory, pods string) *kapi.ResourceQuota {
+	return &kapi.ResourceQuota{
+		TypeMeta: unversioned.TypeMeta{
+			Kind: "resourcequotas",
+		},
+		ObjectMeta: kapi.ObjectMeta{
+			Name:      name,
+			Namespace: namespace,
+		},
+		Spec: kapi.ResourceQuotaSpec{
+			Hard: kapi.ResourceList(map[kapi.ResourceName]resource.Quantity{
+				kapi.ResourceMemory: resource.MustParse(memory),
+				kapi.ResourcePods:   resource.MustParse(pods),
+			}),
+		},
+	}
+}
+
+func podResource(uid, name, namespace, resourceVersion string, request resource.Quantity, rt []*RunningTime) *ResourceObject {
+	return &ResourceObject{
+		UID:             types.UID(uid),
+		Name:            name,
+		Namespace:       namespace,
+		Kind:            PodKind,
+		ResourceVersion: resourceVersion,
+		MemoryRequested: request,
+		RunningTimes:    rt,
+	}
+}
+
+func rcResource(uid, name, namespace, resourceVersion, dc string, rt []*RunningTime) *ResourceObject {
+	return &ResourceObject{
+		UID:              types.UID(uid),
+		Name:             name,
+		Namespace:        namespace,
+		Kind:             RCKind,
+		ResourceVersion:  resourceVersion,
+		DeploymentConfig: dc,
+		RunningTimes:     rt,
+	}
+}
+
+func projectResource(name string, wake, lastSleep time.Time) *ResourceObject {
+	return &ResourceObject{
+		UID:              types.UID(name),
+		Name:             name,
+		Namespace:        name,
+		Kind:             ProjectKind,
+		WakeTime:         wake,
+		LastSleepTime:    lastSleep,
+		ProjectSortIndex: 0.0,
+	}
+}
+
+func runningTime(start, end time.Time) *RunningTime {
+	return &RunningTime{
+		Start: start,
+		End:   end,
+	}
+}
