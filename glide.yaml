@@ -1,0 +1,8 @@
+package: github.com/openshift/online/force-sleep
+
+import:
+# This is the core Origin dependency.
+- package: github.com/openshift/origin
+  version: v3.4.0.23
+  repo:    git@github.com:openshift/ose.git
+  vcs:     git

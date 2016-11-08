@@ -1,0 +1,113 @@
+apiVersion: v1
+kind: Template
+parameters:
+- name: QUOTA_HOURS
+  description: Maximum quota-hours allowed in period before force sleep
+
+- name: PERIOD
+  description: Length of period in hours for quota consumption
+
+- name: NAME
+  description: The name of the DeploymentConfig.
+  value: force-sleep
+
+- name: SYNC_PERIOD
+  description: Interval to sync project status
+
+- name: PROJECT_SLEEP_LENGTH
+  description: Length of time to apply force-sleep to projects over quota.
+
+- name: WORKERS
+  description: Number of worker threads to process project sync
+
+- name: EXCLUDE_NAMESPACES
+  description: Comma-separated list of namespace to exclude in quota enforcement
+
+- name: IMAGE_PULL_POLICY
+  description: The image pull policy (configurable to facilitate testing)
+  value: IfNotPresent
+
+- name: FORCE_SLEEP_IMAGE
+  description: The force sleep docker image
+  value: openshift/force-sleep:latest
+  
+objects:
+# A role for force sleep
+- apiVersion: v1
+  kind: ClusterRole
+  metadata:
+    name: force-sleep
+  rules:
+  - resources:
+    - projects
+    - namespaces
+    - pods
+    - replicationcontrollers
+    - deploymentconfigs
+    - resourcequotas
+    verbs:
+    - get
+    - list
+    - create
+    - update
+    - delete
+# A service account for use by force sleep
+- apiVersion: v1
+  kind: ServiceAccount
+  metadata:
+    name: force-sleep
+# Binds the service account to the force sleep role
+- apiVersion: v1
+  kind: ClusterRoleBinding
+  metadata:
+    name: force-sleep
+  roleRef:
+    name: force-sleep
+  subjects:
+  - kind: ServiceAccount
+    name: force-sleep
+    namespace: openshift-infra
+# The force sleep application
+- apiVersion: v1
+  kind: DeploymentConfig
+  metadata:
+    name: ${NAME}
+  spec:
+    replicas: 1
+    selector:
+      app: ${NAME}
+    strategy:
+      type: Recreate
+    triggers:
+    - type: ConfigChange
+    template:
+      metadata:
+        labels:
+          app: ${NAME}
+      spec:
+        serviceAccountName: force-sleep
+        containers:
+        - name: force-sleep
+          image: ${FORCE_SLEEP_IMAGE}
+          imagePullPolicy: ${IMAGE_PULL_POLICY}
+          env:
+          - name: QUOTA_HOURS
+            value: ${QUOTA_HOURS}
+          - name: PERIOD
+            value: ${PERIOD}
+          - name: SYNC_PERIOD
+            value: ${SYNC_PERIOD}
+          - name: PROJECT_SLEEP_LENGTH
+            value: ${PROJECT_SLEEP_LENGTH}
+          - name: WORKERS
+            value: ${WORKERS}
+          - name: EXCLUDE_NAMESPACES
+            value: ${EXCLUDE_NAMESPACES}
+          command:
+          - /usr/bin/force-sleep
+          - -q $(QUOTA_HOURS)
+          - -p $(PERIOD)
+          - -s $(SYNC_PERIOD)
+          - -z $(PROJECT_SLEEP_LENGTH)
+          - -w $(WORKERS)
+          - -n $(EXCLUDE_NAMESPACES)
