@@ -4,6 +4,12 @@ parameters:
 - name: QUOTA_HOURS
   description: Maximum quota-hours allowed in period before force sleep
 
+- name: TERMINATING_QUOTA
+  description: Quota for terminating pods
+
+- name: NONTERMINATING_QUOTA
+  description: Quota for nonterminating pods
+
 - name: PERIOD
   description: Length of period in hours for quota consumption
 
@@ -112,3 +118,5 @@ objects:
           - -z=$(PROJECT_SLEEP_LENGTH)
           - -w=$(WORKERS)
           - -n=$(EXCLUDE_NAMESPACES)
+	  - -terminating=$(TERMINATING_QUOTA)
+	  - -nonterminating=$(NONTERMINATING_QUOTA)

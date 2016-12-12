@@ -19,7 +19,9 @@ oc new-app -n openshift-infra \
    -p SYNC_PERIOD=1h \
    -p PROJECT_SLEEP_LENGTH=8h \
    -p WORKERS=10 \
-   -p EXCLUDE_NAMESPACES=openshift-infra
+   -p EXCLUDE_NAMESPACES="openshift,openshift-infra"
+   -p TERMINATING_QUOTA=1Gi \
+   -p NONTERMINATING_QUOTA=1Gi
 ```
 
 Building locally:

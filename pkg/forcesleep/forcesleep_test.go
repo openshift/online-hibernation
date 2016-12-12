@@ -33,6 +33,8 @@ func TestSyncProject(t *testing.T) {
 		Quota                    string
 		Period                   string
 		ProjectSleepPeriod       string
+		TermQuota                string
+		NonTermQuota             string
 		Projects                 []string
 		DeploymentConfigs        []*deployapi.DeploymentConfig
 		Pods                     []*kapi.Pod
@@ -46,6 +48,8 @@ func TestSyncProject(t *testing.T) {
 			Quota:              "16h",
 			Period:             "24h",
 			ProjectSleepPeriod: "8h",
+			TermQuota:          "1G",
+			NonTermQuota:       "1G",
 			Projects:           []string{"test"},
 			ResourceQuotas: []*kapi.ResourceQuota{
 				quota("compute-resources", "test", "1G", "1"),
@@ -60,7 +64,7 @@ func TestSyncProject(t *testing.T) {
 				dc("dc1", "test"),
 			},
 			Resources: []*ResourceObject{
-				projectResource("test", time.Time{}, time.Time{}),
+				projectResource("test", time.Time{}),
 				rcResource("rc1", "rc1", "test", "1", "dc1", []*RunningTime{
 					runningTime(time.Now().Add(-16*time.Hour), time.Time{}),
 				}),
@@ -71,15 +75,12 @@ func TestSyncProject(t *testing.T) {
 					}),
 			},
 			ExpectedOpenshiftActions: []action{
-				{Verb: "get", Resource: "deploymentconfigs", Name: "dc1"},
 				{Verb: "update", Resource: "deploymentconfigs"},
 			},
 			ExpectedKubeActions: []action{
-				{Verb: "get", Resource: "resourcequotas", Name: "compute-resources"},
 				{Verb: "create", Resource: "resourcequotas", Name: "force-sleep"},
 				{Verb: "list", Resource: "pods"},
 				{Verb: "delete", Resource: "pods", Name: "pod1"},
-				{Verb: "get", Resource: "replicationcontrollers", Name: "rc1"},
 				{Verb: "update", Resource: "replicationcontrollers"},
 			},
 		},
@@ -88,6 +89,8 @@ func TestSyncProject(t *testing.T) {
 			Quota:              "16h",
 			Period:             "24h",
 			ProjectSleepPeriod: "8h",
+			TermQuota:          "1G",
+			NonTermQuota:       "1G",
 			Projects:           []string{"test"},
 			ResourceQuotas: []*kapi.ResourceQuota{
 				quota("compute-resources", "test", "1G", "1"),
@@ -101,7 +104,7 @@ func TestSyncProject(t *testing.T) {
 				dc("dc1", "test"),
 			},
 			Resources: []*ResourceObject{
-				projectResource("test", time.Now(), time.Now().Add(-8*time.Hour)),
+				projectResource("test", time.Now().Add(-8*time.Hour)),
 				rcResource("rc1", "rc1", "test", "1", "dc1", []*RunningTime{
 					runningTime(time.Now().Add(-24*time.Hour),
 						time.Now().Add(-8*time.Hour)),
@@ -117,6 +120,8 @@ func TestSyncProject(t *testing.T) {
 			Quota:              "16h",
 			Period:             "24h",
 			ProjectSleepPeriod: "8h",
+			TermQuota:          "1G",
+			NonTermQuota:       "1G",
 			Projects:           []string{"test"},
 			ResourceQuotas: []*kapi.ResourceQuota{
 				quota("compute-resources", "test", "1G", "1"),
@@ -130,19 +135,18 @@ func TestSyncProject(t *testing.T) {
 				dc("dc1", "test"),
 			},
 			Resources: []*ResourceObject{
-				projectResource("test", time.Now().Add(4*time.Hour), time.Now().Add(-4*time.Hour)),
+				projectResource("test", time.Now().Add(-4*time.Hour)),
 				rcResource("rc1", "rc1", "test", "1", "dc1", []*RunningTime{
 					runningTime(time.Now().Add(-20*time.Hour),
 						time.Now().Add(-4*time.Hour)),
 				}),
 			},
 			ExpectedOpenshiftActions: []action{
-				{Verb: "get", Resource: "deploymentconfigs", Name: "dc1"},
 				{Verb: "update", Resource: "deploymentconfigs"},
 			},
 			ExpectedKubeActions: []action{
-				{Verb: "get", Resource: "replicationcontrollers", Name: "rc1"},
 				{Verb: "update", Resource: "replicationcontrollers"},
+				{Verb: "create", Resource: "resourcequotas", Name: "force-sleep"},
 			},
 		},
 
@@ -150,6 +154,8 @@ func TestSyncProject(t *testing.T) {
 			Quota:              "16h",
 			Period:             "24h",
 			ProjectSleepPeriod: "8h",
+			TermQuota:          "1G",
+			NonTermQuota:       "1G",
 			Projects:           []string{"test"},
 			ResourceQuotas: []*kapi.ResourceQuota{
 				quota("compute-resources", "test", "1G", "2"),
@@ -165,7 +171,7 @@ func TestSyncProject(t *testing.T) {
 				dc("dc1", "test"),
 			},
 			Resources: []*ResourceObject{
-				projectResource("test", time.Time{}, time.Time{}),
+				projectResource("test", time.Time{}),
 				rcResource("rc1", "rc1", "test", "1", "dc1", []*RunningTime{
 					runningTime(time.Now().Add(-16*time.Hour),
 						time.Time{}),
@@ -182,16 +188,13 @@ func TestSyncProject(t *testing.T) {
 					}),
 			},
 			ExpectedOpenshiftActions: []action{
-				{Verb: "get", Resource: "deploymentconfigs", Name: "dc1"},
 				{Verb: "update", Resource: "deploymentconfigs"},
 			},
 			ExpectedKubeActions: []action{
 				{Verb: "delete", Resource: "pods", Name: "pod1"},
 				{Verb: "delete", Resource: "pods", Name: "pod2"},
-				{Verb: "get", Resource: "resourcequotas", Name: "compute-resources"},
 				{Verb: "create", Resource: "resourcequotas", Name: "force-sleep"},
 				{Verb: "list", Resource: "pods"},
-				{Verb: "get", Resource: "replicationcontrollers", Name: "rc1"},
 				{Verb: "update", Resource: "replicationcontrollers"},
 			},
 		},
@@ -200,6 +203,8 @@ func TestSyncProject(t *testing.T) {
 			Quota:              "16h",
 			Period:             "24h",
 			ProjectSleepPeriod: "8h",
+			TermQuota:          "1G",
+			NonTermQuota:       "1G",
 			Projects:           []string{"test"},
 			ResourceQuotas: []*kapi.ResourceQuota{
 				quota("compute-resources", "test", "1G", "2"),
@@ -214,7 +219,7 @@ func TestSyncProject(t *testing.T) {
 				dc("dc1", "test"),
 			},
 			Resources: []*ResourceObject{
-				projectResource("test", time.Time{}, time.Time{}),
+				projectResource("test", time.Time{}),
 				rcResource("rc1", "rc1", "test", "1", "dc1", []*RunningTime{
 					runningTime(time.Now().Add(-8*time.Hour),
 						time.Time{}),
@@ -226,15 +231,15 @@ func TestSyncProject(t *testing.T) {
 					}),
 			},
 			ExpectedOpenshiftActions: []action{},
-			ExpectedKubeActions: []action{
-				{Verb: "get", Resource: "resourcequotas", Name: "compute-resources"},
-			},
+			ExpectedKubeActions:      []action{},
 		},
 
 		"Do not apply force-sleep if memory quota has not been exceeded": {
 			Quota:              "16h",
 			Period:             "24h",
 			ProjectSleepPeriod: "8h",
+			TermQuota:          "1G",
+			NonTermQuota:       "1G",
 			Projects:           []string{"test"},
 			ResourceQuotas: []*kapi.ResourceQuota{
 				quota("compute-resources", "test", "1G", "2"),
@@ -247,7 +252,7 @@ func TestSyncProject(t *testing.T) {
 				dc("dc1", "test"),
 			},
 			Resources: []*ResourceObject{
-				projectResource("test", time.Time{}, time.Time{}),
+				projectResource("test", time.Time{}),
 				rcResource("rc1", "rc1", "test", "1", "dc1", []*RunningTime{
 					runningTime(time.Now().Add(-16*time.Hour),
 						time.Now().Add(-8*time.Hour)),
@@ -261,6 +266,8 @@ func TestSyncProject(t *testing.T) {
 			Quota:              "16h",
 			Period:             "24h",
 			ProjectSleepPeriod: "8h",
+			TermQuota:          "1G",
+			NonTermQuota:       "1G",
 			Projects:           []string{"test"},
 			ResourceQuotas: []*kapi.ResourceQuota{
 				quota("compute-resources", "test", "1G", "1"),
@@ -275,7 +282,7 @@ func TestSyncProject(t *testing.T) {
 				dc("dc1", "test"),
 			},
 			Resources: []*ResourceObject{
-				projectResource("test", time.Time{}, time.Time{}),
+				projectResource("test", time.Time{}),
 				rcResource("rc1", "rc1", "test", "1", "dc1", []*RunningTime{
 					runningTime(time.Now().Add(-16*time.Hour),
 						time.Time{}),
@@ -288,10 +295,8 @@ func TestSyncProject(t *testing.T) {
 			},
 			ExpectedOpenshiftActions: []action{
 				{Verb: "get", Resource: "deploymentconfigs", Name: "dc1"},
-				{Verb: "update", Resource: "deploymentconfigs"},
 			},
 			ExpectedKubeActions: []action{
-				{Verb: "get", Resource: "resourcequotas", Name: "compute-resources"},
 				{Verb: "get", Resource: "replicationcontrollers", Name: "rc1"},
 				{Verb: "update", Resource: "replicationcontrollers"},
 			},
@@ -301,6 +306,8 @@ func TestSyncProject(t *testing.T) {
 			Quota:              "16h",
 			Period:             "24h",
 			ProjectSleepPeriod: "8h",
+			TermQuota:          "1G",
+			NonTermQuota:       "1G",
 			Projects:           []string{"test"},
 			ResourceQuotas: []*kapi.ResourceQuota{
 				quota("compute-resources", "test", "1G", "2"),
@@ -317,7 +324,7 @@ func TestSyncProject(t *testing.T) {
 				dc("dc1", "test"),
 			},
 			Resources: []*ResourceObject{
-				projectResource("test", time.Time{}, time.Time{}),
+				projectResource("test", time.Time{}),
 				rcResource("rc1", "rc1", "test", "1", "dc1", []*RunningTime{
 					runningTime(time.Now().Add(-8*time.Hour),
 						time.Time{}),
@@ -334,10 +341,11 @@ func TestSyncProject(t *testing.T) {
 			},
 			ExpectedOpenshiftActions: []action{
 				{Verb: "get", Resource: "deploymentconfigs", Name: "dc1"},
-				{Verb: "update", Resource: "deploymentconfigs"},
 			},
 			ExpectedKubeActions: []action{
-				{Verb: "get", Resource: "resourcequotas", Name: "compute-resources"},
+				{Verb: "get", Resource: "replicationcontrollers", Name: "rc1"},
+				{Verb: "get", Resource: "replicationcontrollers", Name: "rc2"},
+				{Verb: "update", Resource: "replicationcontrollers"},
 			},
 		},
 	}
@@ -362,6 +370,8 @@ func TestSyncProject(t *testing.T) {
 			Quota:              quota,
 			Period:             period,
 			ProjectSleepPeriod: projectSleepPeriod,
+			TermQuota:          resource.MustParse(test.TermQuota),
+			NonTermQuota:       resource.MustParse(test.NonTermQuota),
 		}
 		kc := &ktestclient.Fake{}
 		kc.AddReactor("list", "resourcequotas", func(action ktestclient.Action) (handled bool, ret runtime.Object, err error) {
@@ -707,6 +717,7 @@ func podResource(uid, name, namespace, resourceVersion string, request resource.
 		ResourceVersion: resourceVersion,
 		MemoryRequested: request,
 		RunningTimes:    rt,
+		Terminating:     false,
 	}
 }
 
@@ -722,13 +733,12 @@ func rcResource(uid, name, namespace, resourceVersion, dc string, rt []*RunningT
 	}
 }
 
-func projectResource(name string, wake, lastSleep time.Time) *ResourceObject {
+func projectResource(name string, lastSleep time.Time) *ResourceObject {
 	return &ResourceObject{
 		UID:              types.UID(name),
 		Name:             name,
 		Namespace:        name,
 		Kind:             ProjectKind,
-		WakeTime:         wake,
 		LastSleepTime:    lastSleep,
 		ProjectSortIndex: 0.0,
 	}
