@@ -1,6 +1,7 @@
 package forcesleep
 
 import (
+	"errors"
 	"math"
 	"sort"
 	"sync"
@@ -14,7 +15,7 @@ import (
 	"github.com/spf13/pflag"
 
 	kapi "k8s.io/kubernetes/pkg/api"
-	"k8s.io/kubernetes/pkg/api/errors"
+	kerrors "k8s.io/kubernetes/pkg/api/errors"
 	"k8s.io/kubernetes/pkg/api/resource"
 	kcache "k8s.io/kubernetes/pkg/client/cache"
 	kclient "k8s.io/kubernetes/pkg/client/unversioned"
@@ -72,18 +73,19 @@ type Sleeper struct {
 }
 
 type ResourceObject struct {
-	Mutex            sync.RWMutex
-	UID              types.UID
-	Name             string
-	Namespace        string
-	Kind             string
-	Terminating      bool
-	ResourceVersion  string
-	RunningTimes     []*RunningTime
-	MemoryRequested  resource.Quantity
-	DeploymentConfig string
-	LastSleepTime    time.Time
-	ProjectSortIndex float64
+	Mutex             sync.RWMutex
+	UID               types.UID
+	Name              string
+	Namespace         string
+	Kind              string
+	Terminating       bool
+	ResourceVersion   string
+	RunningTimes      []*RunningTime
+	MemoryRequested   resource.Quantity
+	DeploymentConfig  string
+	LastSleepTime     time.Time
+	ProjectSortIndex  float64
+	DeletionTimestamp time.Time
 }
 
 type RunningTime struct {
@@ -101,7 +103,8 @@ func newResourceFromPod(pod *kapi.Pod) *ResourceObject {
 	if (pod.Spec.RestartPolicy != kapi.RestartPolicyAlways) && (pod.Spec.ActiveDeadlineSeconds != nil) {
 		terminating = true
 	}
-	return &ResourceObject{
+
+	resource := &ResourceObject{
 		UID:             pod.ObjectMeta.UID,
 		Name:            pod.ObjectMeta.Name,
 		Namespace:       pod.ObjectMeta.Namespace,
@@ -111,10 +114,18 @@ func newResourceFromPod(pod *kapi.Pod) *ResourceObject {
 		MemoryRequested: pod.Spec.Containers[0].Resources.Requests["memory"],
 		RunningTimes:    make([]*RunningTime, 0),
 	}
+
+	if pod.ObjectMeta.DeletionTimestamp.IsZero() {
+		resource.DeletionTimestamp = time.Time{}
+	} else {
+		resource.DeletionTimestamp = pod.ObjectMeta.DeletionTimestamp.Time
+	}
+	return resource
+
 }
 
 func newResourceFromRC(rc *kapi.ReplicationController) *ResourceObject {
-	return &ResourceObject{
+	resource := &ResourceObject{
 		UID:              rc.ObjectMeta.UID,
 		Name:             rc.ObjectMeta.Name,
 		Namespace:        rc.ObjectMeta.Namespace,
@@ -123,6 +134,13 @@ func newResourceFromRC(rc *kapi.ReplicationController) *ResourceObject {
 		DeploymentConfig: rc.ObjectMeta.Annotations[OpenShiftDCName],
 		RunningTimes:     make([]*RunningTime, 0),
 	}
+
+	if rc.ObjectMeta.DeletionTimestamp.IsZero() {
+		resource.DeletionTimestamp = time.Time{}
+	} else {
+		resource.DeletionTimestamp = rc.ObjectMeta.DeletionTimestamp.Time
+	}
+	return resource
 }
 
 func newResourceFromProject(namespace string) *ResourceObject {
@@ -136,6 +154,18 @@ func newResourceFromProject(namespace string) *ResourceObject {
 	}
 }
 
+func newResourceFromInterface(resource interface{}) *ResourceObject {
+	switch r := resource.(type) {
+	case *kapi.Pod:
+		return newResourceFromPod(r)
+	case *kapi.ReplicationController:
+		return newResourceFromRC(r)
+	}
+	return nil
+}
+
+// Checks if we have a ResourceObject in cache for requested project
+// If not, a new ResourceObject is created for that project
 func (s *Sleeper) createProjectInCache(namespace string) {
 	// Make sure we have a tracking resource for the project to monitor last sleep time
 	proj, err := s.resources.ByIndex("getProject", namespace)
@@ -226,7 +256,14 @@ func (s *Sleeper) resourceInCache(UID string) bool {
 }
 
 // Adds a new runningtime start value to a resource object
-func (s *Sleeper) startResource(UID string) {
+func (s *Sleeper) startResource(r *ResourceObject) {
+	s.createProjectInCache(r.Namespace)
+	UID := string(r.UID)
+	if !s.resourceInCache(UID) {
+		s.resources.Add(r)
+	}
+
+	// Make sure object was successfully created before working on it
 	obj, exists, err := s.resources.GetByKey(UID)
 	if err != nil {
 		glog.Errorf("Error starting resource by UID: %s", err)
@@ -235,7 +272,7 @@ func (s *Sleeper) startResource(UID string) {
 	if exists {
 		resource := obj.(*ResourceObject)
 		glog.V(2).Infof("Starting resource: %s\n", resource.Name)
-		if resource.isStopped() {
+		if !resource.isStarted() {
 			runTime := &RunningTime{
 				Start: time.Now(),
 			}
@@ -248,24 +285,25 @@ func (s *Sleeper) startResource(UID string) {
 }
 
 // Adds an end time to a resource object
-func (s *Sleeper) stopResource(UID string, resource interface{}) {
+func (s *Sleeper) stopResource(r *ResourceObject) {
 	var stopTime time.Time
-	switch r := resource.(type) {
-	case *kapi.Pod:
-		if s.resourceInCache(UID) {
-			if !r.ObjectMeta.DeletionTimestamp.IsZero() {
-				stopTime = r.ObjectMeta.DeletionTimestamp.Time
-			}
-		}
 
-	case *kapi.ReplicationController:
-		if s.resourceInCache(UID) {
-			if !r.ObjectMeta.DeletionTimestamp.IsZero() {
-				stopTime = r.ObjectMeta.DeletionTimestamp.Time
-			}
+	s.createProjectInCache(r.Namespace)
+	resourceTime := r.DeletionTimestamp
+	UID := string(r.UID)
+
+	// See if we already have a reference to this resource in cache
+	if s.resourceInCache(UID) {
+		// Use the resource's given deletion time, if it exists
+		if !resourceTime.IsZero() {
+			stopTime = resourceTime
 		}
+	} else {
+		// If resource is not in cache, then ignore Delete event
+		return
 	}
 
+	// If there is an error with the given deletion time, use "now"
 	now := time.Now()
 	if stopTime.After(now) || stopTime.IsZero() {
 		stopTime = now
@@ -290,6 +328,8 @@ func (s *Sleeper) stopResource(UID string, resource interface{}) {
 	}
 }
 
+// Checks to see if a resource is stopped in our cache
+// Ie, the resource's most recent RunningTime has a specified End time
 func (r *ResourceObject) isStopped() bool {
 	runtimes := len(r.RunningTimes)
 	if runtimes == 0 {
@@ -301,59 +341,58 @@ func (r *ResourceObject) isStopped() bool {
 }
 
 func (r *ResourceObject) isStarted() bool {
-	runtimes := len(r.RunningTimes)
-	if runtimes == 0 {
-		return false
-	} else {
-		return r.RunningTimes[runtimes-1].End.IsZero()
-	}
+	return !r.isStopped()
 }
 
+// Handles incoming events for resources of any type
 func (s *Sleeper) handleResource(eventType watch.EventType, resource interface{}) error {
-	var UID string
 	switch eventType {
 	case watch.Added:
 	case watch.Modified:
 		switch r := resource.(type) {
 		case *kapi.Pod:
-			s.createProjectInCache(r.ObjectMeta.Namespace)
-			UID = string(r.ObjectMeta.UID)
-
-			glog.V(2).Infof("Received ADD/MODIFY for pod: %s\n", r.Name)
-			switch r.Status.Phase {
-			case kapi.PodRunning:
-				if !s.resourceInCache(UID) {
-					newResource := newResourceFromPod(r)
-					s.resources.Add(newResource)
-				}
-				s.startResource(UID)
-			case kapi.PodSucceeded:
-			case kapi.PodFailed:
-			case kapi.PodUnknown:
-				s.stopResource(UID, resource)
-			}
-
+			s.handlePodChange(r)
 		case *kapi.ReplicationController:
-			s.createProjectInCache(r.ObjectMeta.Namespace)
-			UID = string(r.ObjectMeta.UID)
-
-			glog.V(2).Infof("Received ADD/MODIFY for RC: %s\n", r.Name)
-			if r.Status.Replicas > 0 {
-				if !s.resourceInCache(UID) {
-					newResource := newResourceFromRC(r)
-					s.resources.Add(newResource)
-				}
-				s.startResource(UID)
-			} else { // replicas == 0
-				s.stopResource(UID, resource)
-			}
-
+			s.handleRCChange(r)
 		}
 	case watch.Deleted:
 		glog.V(2).Infof("Received DELETE event\n")
-		s.stopResource(UID, resource)
+		r := newResourceFromInterface(resource)
+		if r != nil {
+			s.stopResource(r)
+		}
 	}
 	return nil
+}
+
+// Function for handling Pod ADD/MODIFY events
+func (s *Sleeper) handlePodChange(pod *kapi.Pod) {
+	glog.V(2).Infof("Received ADD/MODIFY for pod: %s\n", pod.Name)
+	resourceObject := newResourceFromPod(pod)
+
+	// If the pod is running, make sure it's started in cache
+	// Otherwise, make sure it's stopped
+	switch pod.Status.Phase {
+	case kapi.PodRunning:
+		s.startResource(resourceObject)
+	case kapi.PodSucceeded:
+	case kapi.PodFailed:
+	case kapi.PodUnknown:
+		s.stopResource(resourceObject)
+	}
+}
+
+// Function for handling RC ADD/MODIFY events
+func (s *Sleeper) handleRCChange(rc *kapi.ReplicationController) {
+	glog.V(2).Infof("Received ADD/MODIFY for RC: %s\n", rc.Name)
+	resourceObject := newResourceFromRC(rc)
+
+	// If RC has more than 0 active replicas, make sure it's started in cache
+	if rc.Status.Replicas > 0 {
+		s.startResource(resourceObject)
+	} else { // replicas == 0
+		s.stopResource(resourceObject)
+	}
 }
 
 // Spawns goroutines to sync projects
@@ -480,16 +519,25 @@ func (s *Sleeper) scaleProjectDCs(namespace string) error {
 	if err != nil {
 		return err
 	}
+	failed := false
 	for _, thisDC := range dcList.Items {
 		thisDC.Spec.Replicas = 0
 		_, err = dcInterface.Update(&thisDC)
 		if err != nil {
-			glog.Errorf("Error scaling DC in namespace %s: %s\n", namespace, err)
+			if kerrors.IsNotFound(err) {
+				continue
+			} else {
+				glog.Errorf("Error scaling DC in namespace %s: %s\n", namespace, err)
+				failed = true
+			}
 		}
 
 	}
-	return nil
-
+	if failed {
+		return errors.New("Failed to scale all project DCs")
+	} else {
+		return nil
+	}
 }
 
 func (s *Sleeper) scaleProjectRCs(namespace string) error {
@@ -499,14 +547,24 @@ func (s *Sleeper) scaleProjectRCs(namespace string) error {
 	if err != nil {
 		return err
 	}
+	failed := false
 	for _, thisRC := range rcList.Items {
 		thisRC.Spec.Replicas = 0
 		_, err = rcInterface.Update(&thisRC)
 		if err != nil {
-			glog.Errorf("Error scaling RC in namespace %s: %s\n", namespace, err)
+			if kerrors.IsNotFound(err) {
+				continue
+			} else {
+				glog.Errorf("Error scaling RC in namespace %s: %s\n", namespace, err)
+				failed = true
+			}
 		}
 	}
-	return nil
+	if failed {
+		return errors.New("Failed to scale all project RCs")
+	} else {
+		return nil
+	}
 }
 
 func (s *Sleeper) deleteProjectPods(namespace string) error {
@@ -516,13 +574,23 @@ func (s *Sleeper) deleteProjectPods(namespace string) error {
 	if err != nil {
 		return err
 	}
+	failed := false
 	for _, pod := range podList.Items {
 		err = podInterface.Delete(pod.ObjectMeta.Name, &kapi.DeleteOptions{})
 		if err != nil {
-			glog.Errorf("Error deleting pods in namespace %s: %s\n", namespace, err)
+			if kerrors.IsNotFound(err) {
+				continue
+			} else {
+				glog.Errorf("Error deleting pods in namespace %s: %s\n", namespace, err)
+				failed = true
+			}
 		}
 	}
-	return nil
+	if failed {
+		return errors.New("Failed to delete all project pods")
+	} else {
+		return nil
+	}
 }
 
 func (s *Sleeper) wakeProject(project *ResourceObject) bool {
@@ -532,10 +600,12 @@ func (s *Sleeper) wakeProject(project *ResourceObject) bool {
 			glog.V(2).Infof("Removing sleep quota for project %s\n", namespace)
 			quotaInterface := s.kubeClient.ResourceQuotas(namespace)
 			err := quotaInterface.Delete(ProjectSleepQuotaName)
-			if errors.IsNotFound(err) {
-				glog.V(0).Infof("Error removing sleep quota: %s", err)
-			} else if err != nil {
-				glog.Errorf("Error removing sleep quota: %s", err)
+			if err != nil {
+				if kerrors.IsNotFound(err) {
+					glog.V(0).Infof("Error removing sleep quota: %s", err)
+				} else {
+					glog.Errorf("Error removing sleep quota: %s", err)
+				}
 			}
 			project.LastSleepTime = time.Time{}
 			s.resources.Update(project)
@@ -578,9 +648,12 @@ func (s *Sleeper) SyncProject(namespace string) {
 	nonTermQuotaSecondsConsumed := 0.0
 	for _, obj := range pods {
 		pod := obj.(*ResourceObject)
-		totalRuntime := pod.GetResourceRuntime(s.config.Period)
 		if s.PruneResource(pod) {
 			continue
+		}
+		totalRuntime, changed := pod.GetResourceRuntime(s.config.Period)
+		if changed {
+			s.resources.Update(pod)
 		}
 		seconds := float64(totalRuntime.Seconds())
 		memoryLimit := s.memoryQuota(namespace, pod)
@@ -599,11 +672,11 @@ func (s *Sleeper) SyncProject(namespace string) {
 			sleepQuota := s.projectSleepQuota.(*kapi.ResourceQuota)
 			quotaInterface := s.kubeClient.ResourceQuotas(namespace)
 			_, err := quotaInterface.Create(sleepQuota)
-			if err != nil && !errors.IsAlreadyExists(err) {
+			if err != nil && !kerrors.IsAlreadyExists(err) {
 				glog.V(2).Infof("Error creating sleep quota on project %s: %s\n", namespace, err)
 				return
 			}
-			if errors.IsAlreadyExists(err) {
+			if kerrors.IsAlreadyExists(err) {
 				return
 			}
 			err = s.applyProjectSleep(namespace, project.LastSleepTime, project.LastSleepTime.Add(s.config.ProjectSleepPeriod))
@@ -641,9 +714,12 @@ func (s *Sleeper) SyncProject(namespace string) {
 	}
 	for _, obj := range rcs {
 		rc := obj.(*ResourceObject)
-		totalRuntime := rc.GetResourceRuntime(s.config.Period)
 		if s.PruneResource(rc) {
 			continue
+		}
+		totalRuntime, changed := rc.GetResourceRuntime(s.config.Period)
+		if changed {
+			s.resources.Update(rc)
 		}
 		if totalRuntime >= s.config.Quota {
 			glog.V(2).Infof("RC %s over quota in project %s\n", rc.Name, namespace)
@@ -665,10 +741,6 @@ func (s *Sleeper) SyncProject(namespace string) {
 	for _, name := range dcOverQuota {
 		// Scale down dcs that are over quota
 		glog.V(2).Infof("Scaling DC %s in project (%s)\n", name, namespace)
-		_, err := s.osClient.DeploymentConfigs(namespace).Get(name)
-		if err != nil {
-			glog.V(0).Infof("Error getting DC %s/%s: %s\n", name, namespace, err)
-		}
 
 		// Scale RCs related to DC
 		dcRCs, err := s.resources.ByIndex("rcByDC", name)
@@ -682,12 +754,10 @@ func (s *Sleeper) SyncProject(namespace string) {
 	}
 	for name := range rcOverQuota {
 		// Scale down dcs that are over quota
-		if rcOverQuota[name] {
-			err = s.scaleRC(name, namespace)
-			if err != nil {
-				glog.Errorf("Error scaling RC %s: %s", name, err)
-				continue
-			}
+		err = s.scaleDownRC(name, namespace)
+		if err != nil {
+			glog.Errorf("Error scaling RC %s: %s", name, err)
+			continue
 		}
 	}
 
@@ -695,7 +765,7 @@ func (s *Sleeper) SyncProject(namespace string) {
 	s.updateProjectSortIndex(namespace, quotaSecondsConsumed)
 }
 
-func (s *Sleeper) scaleRC(name, namespace string) error {
+func (s *Sleeper) scaleDownRC(name, namespace string) error {
 	glog.V(2).Infof("Scaling RC %s in project (%s)\n", name, namespace)
 	thisRC, err := s.kubeClient.ReplicationControllers(namespace).Get(name)
 	if err != nil {
@@ -742,7 +812,7 @@ func (s *Sleeper) PruneResource(resource *ResourceObject) bool {
 	}
 }
 
-func (r *ResourceObject) GetResourceRuntime(period time.Duration) time.Duration {
+func (r *ResourceObject) GetResourceRuntime(period time.Duration) (time.Duration, bool) {
 	var total time.Duration
 	count := len(r.RunningTimes) - 1
 	outsidePeriod := 0
@@ -771,8 +841,13 @@ func (r *ResourceObject) GetResourceRuntime(period time.Duration) time.Duration 
 	}
 
 	// Remove running times outside of period
+	changed := false
 	r.RunningTimes = r.RunningTimes[outsidePeriod:]
-	return total
+	// Let sync function know if need to update cache with new ResourceObject for removed times
+	if len(r.RunningTimes) < count {
+		changed = true
+	}
+	return total, changed
 }
 
 func getQuotaSeconds(seconds float64, request, limit resource.Quantity) float64 {
