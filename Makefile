@@ -17,17 +17,17 @@ build: check-gopath
 .PHONY: build
 
 
-# Runs the unit tests.
+# Runs the integration tests.
 #
 # Args:
 #   TESTFLAGS: Flags to pass to `go test`. The `-v` argument is always passed.
 #
 # Examples:
-#   make test TESTFLAGS="-run TestSomething"
-test: build
+#   make test-integration TESTFLAGS="-run TestSomething"
+test-integration: build
 	go test -v $(TESTFLAGS) \
 		github.com/openshift/online/force-sleep/pkg/...
-.PHONY: test
+.PHONY: test-integration
 
 
 # Build a release image. The resulting image can be used with test-release.
@@ -76,7 +76,7 @@ help:
 	@echo "OpenShift Online Force-Sleep Controller"
 	@echo ""
 	@echo "make build                compile binaries"
-	@echo "make test                 run unit tests"
+	@echo "make test-integration     run integration tests"
 	@echo "make release              build release image using Dockerfile"
 	@echo "make test-release         run unit and integration tests in Docker container"
 	@echo "make verify               lint source code"
