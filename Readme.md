@@ -27,4 +27,9 @@ oc new-app -n openshift-infra \
 Building locally:
 `docker build -f Dockerfile.local -t openshift/force-sleep .`
 
+`glog` levels generally follow this structure:
+3: Resource/watch event level messages
+2: Project/sleep level messages
+1: Sleeper/cluster level messages
+
 (WIP) Ansible role contained in `../ansible/roles/force_sleep/tasks/main.yml`

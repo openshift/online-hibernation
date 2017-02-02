@@ -1,7 +1,9 @@
 package forcesleep
 
 import (
+	"encoding/json"
 	"errors"
+	"fmt"
 	"math"
 	"sort"
 	"sync"
@@ -10,13 +12,17 @@ import (
 	osclient "github.com/openshift/origin/pkg/client"
 	"github.com/openshift/origin/pkg/client/cache"
 	"github.com/openshift/origin/pkg/cmd/util/clientcmd"
+	deployapi "github.com/openshift/origin/pkg/deploy/api"
+	unidlingapi "github.com/openshift/origin/pkg/unidling/api"
 
 	"github.com/golang/glog"
 	"github.com/spf13/pflag"
 
 	kapi "k8s.io/kubernetes/pkg/api"
 	kerrors "k8s.io/kubernetes/pkg/api/errors"
+	"k8s.io/kubernetes/pkg/api/meta"
 	"k8s.io/kubernetes/pkg/api/resource"
+	"k8s.io/kubernetes/pkg/api/unversioned"
 	kcache "k8s.io/kubernetes/pkg/client/cache"
 	kclient "k8s.io/kubernetes/pkg/client/unversioned"
 	"k8s.io/kubernetes/pkg/kubectl"
@@ -45,6 +51,7 @@ func (p Projects) Less(i, j int) bool {
 const (
 	PodKind                   = "pods"
 	RCKind                    = "replicationcontrollers"
+	ServiceKind               = "services"
 	ProjectKind               = "project"
 	ComputeQuotaName          = "compute-resources"
 	ComputeTimeboundQuotaName = "compute-resources-timebound"
@@ -66,6 +73,7 @@ type SleeperConfig struct {
 type Sleeper struct {
 	kubeClient        kclient.Interface
 	osClient          osclient.Interface
+	factory           *clientcmd.Factory
 	config            *SleeperConfig
 	resources         kcache.Indexer
 	projectSleepQuota runtime.Object
@@ -86,6 +94,9 @@ type ResourceObject struct {
 	LastSleepTime     time.Time
 	ProjectSortIndex  float64
 	DeletionTimestamp time.Time
+	Selectors         map[string]string
+	Labels            map[string]string
+	Annotations       map[string]string
 }
 
 type RunningTime struct {
@@ -96,6 +107,12 @@ type RunningTime struct {
 type watchListItem struct {
 	objType   runtime.Object
 	watchFunc func(options kapi.ListOptions) (watch.Interface, error)
+}
+
+type ControllerScaleReference struct {
+	Kind     string
+	Name     string
+	Replicas int32
 }
 
 func newResourceFromPod(pod *kapi.Pod) *ResourceObject {
@@ -113,6 +130,16 @@ func newResourceFromPod(pod *kapi.Pod) *ResourceObject {
 		ResourceVersion: pod.ObjectMeta.ResourceVersion,
 		MemoryRequested: pod.Spec.Containers[0].Resources.Requests["memory"],
 		RunningTimes:    make([]*RunningTime, 0),
+		Labels:          make(map[string]string),
+		Annotations:     make(map[string]string),
+	}
+
+	for k, v := range pod.ObjectMeta.Labels {
+		resource.Labels[k] = v
+	}
+
+	for k, v := range pod.ObjectMeta.Annotations {
+		resource.Annotations[k] = v
 	}
 
 	if pod.ObjectMeta.DeletionTimestamp.IsZero() {
@@ -121,7 +148,6 @@ func newResourceFromPod(pod *kapi.Pod) *ResourceObject {
 		resource.DeletionTimestamp = pod.ObjectMeta.DeletionTimestamp.Time
 	}
 	return resource
-
 }
 
 func newResourceFromRC(rc *kapi.ReplicationController) *ResourceObject {
@@ -133,6 +159,16 @@ func newResourceFromRC(rc *kapi.ReplicationController) *ResourceObject {
 		ResourceVersion:  rc.ObjectMeta.ResourceVersion,
 		DeploymentConfig: rc.ObjectMeta.Annotations[OpenShiftDCName],
 		RunningTimes:     make([]*RunningTime, 0),
+		Selectors:        make(map[string]string),
+		Labels:           make(map[string]string),
+	}
+
+	for k, v := range rc.Spec.Selector {
+		resource.Selectors[k] = v
+	}
+
+	for k, v := range rc.ObjectMeta.Labels {
+		resource.Labels[k] = v
 	}
 
 	if rc.ObjectMeta.DeletionTimestamp.IsZero() {
@@ -140,6 +176,23 @@ func newResourceFromRC(rc *kapi.ReplicationController) *ResourceObject {
 	} else {
 		resource.DeletionTimestamp = rc.ObjectMeta.DeletionTimestamp.Time
 	}
+	return resource
+}
+
+func newResourceFromService(svc *kapi.Service) *ResourceObject {
+	resource := &ResourceObject{
+		UID:             svc.ObjectMeta.UID,
+		Name:            svc.ObjectMeta.Name,
+		Namespace:       svc.ObjectMeta.Namespace,
+		Kind:            ServiceKind,
+		ResourceVersion: svc.ObjectMeta.ResourceVersion,
+		Selectors:       make(map[string]string),
+	}
+
+	for k, v := range svc.Spec.Selector {
+		resource.Selectors[k] = v
+	}
+
 	return resource
 }
 
@@ -160,6 +213,8 @@ func newResourceFromInterface(resource interface{}) *ResourceObject {
 		return newResourceFromPod(r)
 	case *kapi.ReplicationController:
 		return newResourceFromRC(r)
+	case *kapi.Service:
+		return newResourceFromService(r)
 	}
 	return nil
 }
@@ -178,15 +233,15 @@ func (s *Sleeper) createProjectInCache(namespace string) {
 	}
 }
 
-func NewSleeper(osClient osclient.Interface, kubeClient kclient.Interface, sc *SleeperConfig) *Sleeper {
+func NewSleeper(osClient osclient.Interface, kubeClient kclient.Interface, sc *SleeperConfig, f *clientcmd.Factory) *Sleeper {
 	ctrl := &Sleeper{
 		osClient:   osClient,
 		kubeClient: kubeClient,
 		config:     sc,
+		factory:    f,
 		resources: kcache.NewIndexer(resourceKey, kcache.Indexers{
 			"byNamespace":        indexResourceByNamespace,
 			"byNamespaceAndKind": indexResourceByNamespaceAndKind,
-			"byFullName":         indexResourceByFullName,
 			"getProject":         getProjectResource,
 			"ofKind":             getAllResourcesOfKind,
 			"rcByDC":             getRCByDC,
@@ -235,6 +290,16 @@ func (s *Sleeper) WatchForEvents() {
 	}
 	kcache.NewReflector(rcLW, &kapi.ReplicationController{}, eventQueue, 0).Run()
 
+	svcLW := &kcache.ListWatch{
+		ListFunc: func(options kapi.ListOptions) (runtime.Object, error) {
+			return s.kubeClient.Services(kapi.NamespaceAll).List(options)
+		},
+		WatchFunc: func(options kapi.ListOptions) (watch.Interface, error) {
+			return s.kubeClient.Services(kapi.NamespaceAll).Watch(options)
+		},
+	}
+	kcache.NewReflector(svcLW, &kapi.Service{}, eventQueue, 0).Run()
+
 	go func() {
 		for {
 			event, res, err := eventQueue.Pop()
@@ -271,7 +336,7 @@ func (s *Sleeper) startResource(r *ResourceObject) {
 	}
 	if exists {
 		resource := obj.(*ResourceObject)
-		glog.V(2).Infof("Starting resource: %s\n", resource.Name)
+		glog.V(3).Infof("Starting resource: %s\n", resource.Name)
 		if !resource.isStarted() {
 			runTime := &RunningTime{
 				Start: time.Now(),
@@ -280,7 +345,7 @@ func (s *Sleeper) startResource(r *ResourceObject) {
 			s.resources.Update(resource)
 		}
 	} else {
-		glog.V(2).Infof("Error starting resource: could not find resource %s\n", UID)
+		glog.Errorf("Error starting resource: could not find resource %s\n", UID)
 	}
 }
 
@@ -316,7 +381,7 @@ func (s *Sleeper) stopResource(r *ResourceObject) {
 	}
 	if exists {
 		resource := obj.(*ResourceObject)
-		glog.V(2).Infof("Stopping resource: %s\n", resource.Name)
+		glog.V(3).Infof("Stopping resource: %s\n", resource.Name)
 		runTimeCount := len(resource.RunningTimes)
 
 		if resource.isStarted() {
@@ -324,7 +389,7 @@ func (s *Sleeper) stopResource(r *ResourceObject) {
 			s.resources.Update(resource)
 		}
 	} else {
-		glog.V(2).Infof("Error stopping resource: could not find resource %s\n", UID)
+		glog.Errorf("Error stopping resource: could not find resource %s\n", UID)
 	}
 }
 
@@ -354,9 +419,11 @@ func (s *Sleeper) handleResource(eventType watch.EventType, resource interface{}
 			s.handlePodChange(r)
 		case *kapi.ReplicationController:
 			s.handleRCChange(r)
+		case *kapi.Service:
+			s.handleServiceChange(r)
 		}
 	case watch.Deleted:
-		glog.V(2).Infof("Received DELETE event\n")
+		glog.V(3).Infof("Received DELETE event\n")
 		r := newResourceFromInterface(resource)
 		if r != nil {
 			s.stopResource(r)
@@ -367,7 +434,7 @@ func (s *Sleeper) handleResource(eventType watch.EventType, resource interface{}
 
 // Function for handling Pod ADD/MODIFY events
 func (s *Sleeper) handlePodChange(pod *kapi.Pod) {
-	glog.V(2).Infof("Received ADD/MODIFY for pod: %s\n", pod.Name)
+	glog.V(3).Infof("Received ADD/MODIFY for pod: %s\n", pod.Name)
 	resourceObject := newResourceFromPod(pod)
 
 	// If the pod is running, make sure it's started in cache
@@ -384,7 +451,7 @@ func (s *Sleeper) handlePodChange(pod *kapi.Pod) {
 
 // Function for handling RC ADD/MODIFY events
 func (s *Sleeper) handleRCChange(rc *kapi.ReplicationController) {
-	glog.V(2).Infof("Received ADD/MODIFY for RC: %s\n", rc.Name)
+	glog.V(3).Infof("Received ADD/MODIFY for RC: %s\n", rc.Name)
 	resourceObject := newResourceFromRC(rc)
 
 	// If RC has more than 0 active replicas, make sure it's started in cache
@@ -392,6 +459,18 @@ func (s *Sleeper) handleRCChange(rc *kapi.ReplicationController) {
 		s.startResource(resourceObject)
 	} else { // replicas == 0
 		s.stopResource(resourceObject)
+	}
+}
+
+// Function for handling Service ADD/MODIFY events
+func (s *Sleeper) handleServiceChange(svc *kapi.Service) {
+	glog.V(3).Infof("Received ADD/MODIFY for Service: %s\n", svc.Name)
+	r := newResourceFromService(svc)
+	s.createProjectInCache(r.Namespace)
+	if !s.resourceInCache(string(r.UID)) {
+		s.resources.Add(r)
+	} else {
+		s.resources.Update(r)
 	}
 }
 
@@ -460,7 +539,7 @@ func (s *Sleeper) applyProjectSleep(namespace string, sleepTime, wakeTime time.T
 		project.LastSleepTime = sleepTime
 		err = s.resources.Update(project)
 		if err != nil {
-			glog.V(2).Infof("Error setting LastSleepTime for project %s: %s\n", namespace, err)
+			glog.Errorf("Error setting LastSleepTime for project %s: %s\n", namespace, err)
 		}
 
 		quotaInterface := s.kubeClient.ResourceQuotas(namespace)
@@ -472,30 +551,45 @@ func (s *Sleeper) applyProjectSleep(namespace string, sleepTime, wakeTime time.T
 
 	}
 
+	failed := false
+
+	glog.V(2).Infof("Idling services in project %s\n", namespace)
+	err = s.idleProjectServices(namespace)
+	if err != nil {
+		failed = true
+		glog.Errorf("Error idling services in project %s: %s\n", namespace, err)
+	}
+
 	glog.V(2).Infof("Scaling RCs in project %s\n", namespace)
 	err = s.scaleProjectRCs(namespace)
 	if err != nil {
-		return err
+		failed = true
+		glog.Errorf("Error scaling RCs in project %s: %s\n", namespace, err)
 	}
 
 	glog.V(2).Infof("Scaling DCs in project %s\n", namespace)
 	err = s.scaleProjectDCs(namespace)
 	if err != nil {
-		return err
+		failed = true
+		glog.Errorf("Error scaling DCs in project %s: %s\n", namespace, err)
 	}
 
 	glog.V(2).Infof("Deleting pods in project %s\n", namespace)
 	err = s.deleteProjectPods(namespace)
 	if err != nil {
-		return err
+		failed = true
+		glog.Errorf("Error deleting pods in project %s: %s\n", namespace, err)
 	}
 
 	glog.V(2).Infof("Clearing cache for project %s\n", namespace)
 	err = s.clearProjectCache(namespace)
 	if err != nil {
-		return err
+		failed = true
+		glog.Errorf("Error clearing cache in project %s: %s\n", namespace, err)
 	}
-
+	if failed {
+		return fmt.Errorf("Error applying project sleep\n")
+	}
 	return nil
 }
 
@@ -506,11 +600,324 @@ func (s *Sleeper) clearProjectCache(namespace string) error {
 	}
 	for _, resource := range resources {
 		r := resource.(*ResourceObject)
-		if r.Kind != ProjectKind {
+		if r.Kind != ProjectKind && r.Kind != ServiceKind {
 			s.resources.Delete(r)
 		}
 	}
 	return nil
+}
+
+func (s *Sleeper) getAndCopyEndpoint(namespace, name string) (*kapi.Endpoints, error) {
+	endpointInterface := s.kubeClient.Endpoints(namespace)
+	endpoint, err := endpointInterface.Get(name)
+	if err != nil {
+		return nil, errors.New(fmt.Sprintf("Error annotating Endpoint in namespace %s: %s\n", namespace, err))
+	}
+	copy, err := kapi.Scheme.DeepCopy(endpoint)
+	if err != nil {
+		return nil, errors.New(fmt.Sprintf("Error annotating Endpoint in namespace %s: %s\n", namespace, err))
+	}
+	newEndpoint := copy.(*kapi.Endpoints)
+
+	if newEndpoint.Annotations == nil {
+		newEndpoint.Annotations = make(map[string]string)
+	}
+	return newEndpoint, nil
+}
+
+// The goal with this is to re-create `oc idle` to the extent we need to, in order to provide automatic re-scaling on project wake
+// `oc idle` links controllers to endpoints by:
+//   1. taking in an endpoint (service name)
+//   2. getting the pods on that endpoint
+//   3. getting the controller on each pod (and, in the case of DCs, getting the controller on that controller)
+// This approach is:
+//   1. loop through all services in project
+//   2. for each service, get pods on service by label selector
+//   3. get the controller on each pod (and, in the case of DCs, get the controller on that controller)
+//   4. get endpoint with the same name as the service
+func (s *Sleeper) idleProjectServices(namespace string) error {
+	failed := false
+	endpointInterface := s.kubeClient.Endpoints(namespace)
+	svcs, err := s.getProjectServices(namespace)
+	if err != nil {
+		return err
+	}
+
+	projectPods, err := s.getProjectPods(namespace)
+	if err != nil {
+		return err
+	}
+
+	// Loop through all of the services in a namespace
+	for _, obj := range svcs {
+		svc := obj.(*ResourceObject)
+
+		// First we must find the parent controller for each pod
+		pods := s.getPodsForService(svc, projectPods)
+		resourceRefs, err := s.findScalableResourcesForService(pods)
+		if err != nil {
+			glog.Errorf("Error scaling service: %s\n", err)
+			failed = true
+			continue
+		}
+
+		// Now we add a previous-scale annotation to each parent controller, and also get the reference
+		// annotation that will be added to the endpoint later
+		scaleRefs := make(map[kapi.ObjectReference]*ControllerScaleReference)
+		for ref := range resourceRefs {
+			scaleRef, err := s.annotateController(ref, time.Time{})
+			if err != nil {
+				glog.Errorf("Error annotating controller: %s\n", err)
+				failed = true
+				continue
+			}
+			scaleRefs[ref] = scaleRef
+		}
+
+		// Now annotate the endpoints
+		var endpointScaleRefs []*ControllerScaleReference
+		for _, scaleRef := range scaleRefs {
+			endpointScaleRefs = append(endpointScaleRefs, scaleRef)
+		}
+		scaleRefsBytes, err := json.Marshal(endpointScaleRefs)
+		if err != nil {
+			failed = true
+			glog.Errorf("Error annotating Endpoint in namespace %s: %s\n", namespace, err)
+			continue
+		}
+		newEndpoint, err := s.getAndCopyEndpoint(namespace, svc.Name)
+		if err != nil {
+			failed = true
+			glog.Errorf("Error annotating Endpoint in namespace %s: %s\n", namespace, err)
+			continue
+		}
+		newEndpoint.Annotations[unidlingapi.UnidleTargetAnnotation] = string(scaleRefsBytes)
+
+		// Need to delete any previous IdledAtAnnotations to prevent premature unidling
+		if newEndpoint.Annotations[unidlingapi.IdledAtAnnotation] != "" {
+			delete(newEndpoint.Annotations, unidlingapi.IdledAtAnnotation)
+		}
+
+		_, err = endpointInterface.Update(newEndpoint)
+		if err != nil {
+			glog.Errorf("Error marshalling endpoint scale reference while annotating Endpoint in namespace %s: %s\n", namespace, err)
+			failed = true
+		}
+	}
+
+	if failed {
+		return errors.New("Failed to idle all project services")
+	}
+	return nil
+}
+
+func (s *Sleeper) getProjectServices(namespace string) ([]interface{}, error) {
+	namespaceAndKind := namespace + "/" + ServiceKind
+	svcs, err := s.resources.ByIndex("byNamespaceAndKind", namespaceAndKind)
+	if err != nil {
+		return nil, err
+	}
+	return svcs, nil
+}
+
+func (s *Sleeper) getProjectPods(namespace string) ([]interface{}, error) {
+	namespaceAndKind := namespace + "/" + PodKind
+	pods, err := s.resources.ByIndex("byNamespaceAndKind", namespaceAndKind)
+	if err != nil {
+		return nil, err
+	}
+	return pods, nil
+}
+
+// Takes in a list of locally cached Pod ResourceObjects and a Service ResourceObject
+// Compares selector labels on the pods and services to check for any matches which link the two
+func (s *Sleeper) getPodsForService(svc *ResourceObject, podList []interface{}) map[string]runtime.Object {
+	pods := make(map[string]runtime.Object)
+	for _, obj := range podList {
+		pod := obj.(*ResourceObject)
+		for podKey, podVal := range pod.Labels {
+			for svcKey, svcVal := range svc.Selectors {
+				if _, exists := pods[pod.Name]; !exists && svcKey == podKey && svcVal == podVal {
+					podRef, err := s.kubeClient.Pods(pod.Namespace).Get(pod.Name)
+					if err != nil {
+						// This may fail when a pod has been deleted but not yet pruned from cache
+						glog.Errorf("Error getting pod in namespace %s: %s\n", pod.Namespace, err)
+						continue
+					}
+					pods[pod.Name] = podRef
+				}
+			}
+		}
+	}
+	return pods
+}
+
+// Returns an ObjectReference to the parent controller (RC/DC) for a resource
+func getControllerRef(obj runtime.Object) (*kapi.ObjectReference, error) {
+	objMeta, err := meta.Accessor(obj)
+	if err != nil {
+		return nil, err
+	}
+
+	annotations := objMeta.GetAnnotations()
+
+	creatorRefRaw, creatorListed := annotations[kapi.CreatedByAnnotation]
+	if !creatorListed {
+		// if we don't have a creator listed, try the openshift-specific Deployment annotation
+		dcName, dcNameListed := annotations[deployapi.DeploymentConfigAnnotation]
+		if !dcNameListed {
+			return nil, nil
+		}
+
+		return &kapi.ObjectReference{
+			Name:      dcName,
+			Namespace: objMeta.GetNamespace(),
+			Kind:      "DeploymentConfig",
+		}, nil
+	}
+
+	serializedRef := &kapi.SerializedReference{}
+	err = json.Unmarshal([]byte(creatorRefRaw), serializedRef)
+	if err != nil {
+		return nil, err
+	}
+	return &serializedRef.Reference, nil
+}
+
+// Returns a generic runtime.Object for a controller
+func getController(ref kapi.ObjectReference, f *clientcmd.Factory) (runtime.Object, error) {
+	mapper, _ := f.Object(true)
+	gv, err := unversioned.ParseGroupVersion(ref.APIVersion)
+	if err != nil {
+		return nil, err
+	}
+	var mapping *meta.RESTMapping
+	mapping, err = mapper.RESTMapping(unversioned.GroupKind{Group: gv.Group, Kind: ref.Kind}, "")
+	if err != nil {
+		return nil, err
+	}
+	var client ctlresource.RESTClient
+	client, err = f.ClientForMapping(mapping)
+	if err != nil {
+		return nil, err
+	}
+	helper := ctlresource.NewHelper(client, mapping)
+
+	var controller runtime.Object
+	controller, err = helper.Get(ref.Namespace, ref.Name, false)
+	if err != nil {
+		return nil, err
+	}
+
+	return controller, nil
+}
+
+// Takes a list of Pods and looks at their parent controllers
+// Then takes that list of parent controllers and checks if there is another parent above them
+// ex. pod -> RC -> DC, DC is the main parent controller we want to idle
+func (s *Sleeper) findScalableResourcesForService(pods map[string]runtime.Object) (map[kapi.ObjectReference]struct{}, error) {
+	immediateControllerRefs := make(map[kapi.ObjectReference]struct{})
+	for _, pod := range pods {
+		controllerRef, err := getControllerRef(pod)
+		if err != nil {
+			return nil, err
+		}
+		immediateControllerRefs[*controllerRef] = struct{}{}
+	}
+
+	controllerRefs := make(map[kapi.ObjectReference]struct{})
+	for controllerRef := range immediateControllerRefs {
+		controller, err := getController(controllerRef, s.factory)
+		if err != nil {
+			return nil, err
+		}
+
+		if controller != nil {
+			var parentControllerRef *kapi.ObjectReference
+			parentControllerRef, err = getControllerRef(controller)
+			if err != nil {
+				return nil, fmt.Errorf("unable to load the creator of %s %q: %v", controllerRef.Kind, controllerRef.Name, err)
+			}
+
+			if parentControllerRef == nil {
+				controllerRefs[controllerRef] = struct{}{}
+			} else {
+				controllerRefs[*parentControllerRef] = struct{}{}
+			}
+		}
+	}
+	return controllerRefs, nil
+}
+
+// Adds PreviousScaleAnnotations (for applying force-sleep) and IdledAtAnnotations (removing force-sleep)
+// Based on whether an IdledAtTime is being passed in
+func (s *Sleeper) annotateController(ref kapi.ObjectReference, nowTime time.Time) (*ControllerScaleReference, error) {
+	obj, err := getController(ref, s.factory)
+	if err != nil {
+		return nil, err
+	}
+
+	var replicas int32
+	switch controller := obj.(type) {
+	case *deployapi.DeploymentConfig:
+		dcInterface := s.osClient.DeploymentConfigs(controller.Namespace)
+		copy, err := kapi.Scheme.DeepCopy(controller)
+		if err != nil {
+			return nil, err
+		}
+		newDC := copy.(*deployapi.DeploymentConfig)
+		if !nowTime.IsZero() {
+			newDC.Annotations[unidlingapi.IdledAtAnnotation] = nowTime.Format(time.RFC3339)
+		} else {
+			replicas = controller.Spec.Replicas
+			newDC.Annotations[unidlingapi.PreviousScaleAnnotation] = fmt.Sprintf("%v", controller.Spec.Replicas)
+			// Need to remove reference to a previous idling, if it exists
+			if newDC.Annotations[unidlingapi.IdledAtAnnotation] != "" {
+				delete(newDC.Annotations, unidlingapi.IdledAtAnnotation)
+			}
+		}
+
+		_, err = dcInterface.Update(newDC)
+		if err != nil {
+			if kerrors.IsNotFound(err) {
+				return nil, nil
+			} else {
+				return nil, errors.New(fmt.Sprintf("Error annotating DC in namespace %s: %s\n", controller.Namespace, err))
+			}
+		}
+
+	case *kapi.ReplicationController:
+		rcInterface := s.kubeClient.ReplicationControllers(controller.Namespace)
+
+		copy, err := kapi.Scheme.DeepCopy(controller)
+		if err != nil {
+			return nil, err
+		}
+		newRC := copy.(*kapi.ReplicationController)
+		if !nowTime.IsZero() {
+			newRC.Annotations[unidlingapi.IdledAtAnnotation] = nowTime.Format(time.RFC3339)
+		} else {
+			replicas = controller.Spec.Replicas
+			newRC.Annotations[unidlingapi.PreviousScaleAnnotation] = fmt.Sprintf("%v", controller.Spec.Replicas)
+			// Need to remove reference to a previous idling, if it exists
+			if newRC.Annotations[unidlingapi.IdledAtAnnotation] != "" {
+				delete(newRC.Annotations, unidlingapi.IdledAtAnnotation)
+			}
+		}
+
+		_, err = rcInterface.Update(newRC)
+		if err != nil {
+			if kerrors.IsNotFound(err) {
+				return nil, nil
+			} else {
+				return nil, errors.New(fmt.Sprintf("Error annotating RC in namespace %s: %s\n", controller.Namespace, err))
+			}
+		}
+	}
+	return &ControllerScaleReference{
+		Kind:     ref.Kind,
+		Name:     ref.Name,
+		Replicas: replicas}, nil
 }
 
 func (s *Sleeper) scaleProjectDCs(namespace string) error {
@@ -519,10 +926,12 @@ func (s *Sleeper) scaleProjectDCs(namespace string) error {
 	if err != nil {
 		return err
 	}
+
 	failed := false
-	for _, thisDC := range dcList.Items {
-		thisDC.Spec.Replicas = 0
-		_, err = dcInterface.Update(&thisDC)
+	for _, dc := range dcList.Items {
+		// Scale down DC
+		dc.Spec.Replicas = 0
+		_, err = dcInterface.Update(&dc)
 		if err != nil {
 			if kerrors.IsNotFound(err) {
 				continue
@@ -535,9 +944,8 @@ func (s *Sleeper) scaleProjectDCs(namespace string) error {
 	}
 	if failed {
 		return errors.New("Failed to scale all project DCs")
-	} else {
-		return nil
 	}
+	return nil
 }
 
 func (s *Sleeper) scaleProjectRCs(namespace string) error {
@@ -562,9 +970,8 @@ func (s *Sleeper) scaleProjectRCs(namespace string) error {
 	}
 	if failed {
 		return errors.New("Failed to scale all project RCs")
-	} else {
-		return nil
 	}
+	return nil
 }
 
 func (s *Sleeper) deleteProjectPods(namespace string) error {
@@ -588,15 +995,15 @@ func (s *Sleeper) deleteProjectPods(namespace string) error {
 	}
 	if failed {
 		return errors.New("Failed to delete all project pods")
-	} else {
-		return nil
 	}
+	return nil
 }
 
 func (s *Sleeper) wakeProject(project *ResourceObject) bool {
 	namespace := project.Namespace
 	if !project.LastSleepTime.IsZero() {
 		if time.Since(project.LastSleepTime) > s.config.ProjectSleepPeriod {
+			// First remove the force-sleep pod count resource quota from the project
 			glog.V(2).Infof("Removing sleep quota for project %s\n", namespace)
 			quotaInterface := s.kubeClient.ResourceQuotas(namespace)
 			err := quotaInterface.Delete(ProjectSleepQuotaName)
@@ -609,10 +1016,81 @@ func (s *Sleeper) wakeProject(project *ResourceObject) bool {
 			}
 			project.LastSleepTime = time.Time{}
 			s.resources.Update(project)
+
+			err = s.unidleProjectServices(namespace)
+			if err != nil {
+				glog.Errorf("Error applying service unidling: %s", err)
+			}
 			return true
 		}
 	}
 	return false
+}
+
+// This is the "second part" of replicating `oc idle` (first part applied in IdleProjectServices() when put to sleep)
+// which we apply when waking projects:
+// Adds an "idled-at" annotation to Endpoints and Scalable Resources so that traffic will trigger the
+// idling controller to wake them
+func (s *Sleeper) unidleProjectServices(namespace string) error {
+	glog.V(2).Infof("Adding idled-at annotations for project services %s\n", namespace)
+	endpointInterface := s.kubeClient.Endpoints(namespace)
+	svcs, err := s.getProjectServices(namespace)
+	if err != nil {
+		return errors.New(fmt.Sprintf("Error getting project services: %s", err))
+	}
+
+	nowTime := time.Now().UTC()
+
+	failed := false
+	// Loop through all of the services in a namespace
+	for _, obj := range svcs {
+		svc := obj.(*ResourceObject)
+
+		// Get the endpoint object for that service
+		newEndpoint, err := s.getAndCopyEndpoint(namespace, svc.Name)
+		if err != nil {
+			glog.Errorf("Error getting Endpoint in namespace %s: %s\n", namespace, err)
+			failed = true
+			continue
+		}
+		newEndpoint.Annotations[unidlingapi.IdledAtAnnotation] = nowTime.Format(time.RFC3339)
+
+		_, err = endpointInterface.Update(newEndpoint)
+		if err != nil {
+			glog.Errorf("Error annotating Endpoint in namespace %s: %s\n", namespace, err)
+			failed = true
+			continue
+		}
+
+		// Now get controllers for that service
+		// And add an idled-at annotation to those resources
+		scaleRefsBytes := newEndpoint.Annotations[unidlingapi.UnidleTargetAnnotation]
+		var scaleRefs []ControllerScaleReference
+		err = json.Unmarshal([]byte(scaleRefsBytes), &scaleRefs)
+		if err != nil {
+			glog.Errorf("Error annotating DC in namespace %s when unmarshalling scaleRefsBytes from endpoint: %s\n", namespace, err)
+			failed = true
+			continue
+		}
+
+		for _, scaleRef := range scaleRefs {
+			ref := kapi.ObjectReference{
+				Name:      scaleRef.Name,
+				Kind:      scaleRef.Kind,
+				Namespace: svc.Namespace,
+			}
+			_, err := s.annotateController(ref, nowTime)
+			if err != nil {
+				glog.Errorf("Error annotating controller: %s\n", err)
+				failed = true
+				continue
+			}
+		}
+	}
+	if failed {
+		return errors.New("Failed to add unidling annotations to all project services")
+	}
+	return nil
 }
 
 func (s *Sleeper) memoryQuota(namespace string, pod *ResourceObject) resource.Quantity {
@@ -639,8 +1117,7 @@ func (s *Sleeper) SyncProject(namespace string) {
 	project := projObj[0].(*ResourceObject)
 
 	// Iterate through pods to calculate runtimes
-	namespaceAndKind := namespace + "/" + PodKind
-	pods, err := s.resources.ByIndex("byNamespaceAndKind", namespaceAndKind)
+	pods, err := s.getProjectPods(namespace)
 	if err != nil {
 		glog.Errorf("Error getting project (%s) pod resources:", namespace, err)
 	}
@@ -673,7 +1150,7 @@ func (s *Sleeper) SyncProject(namespace string) {
 			quotaInterface := s.kubeClient.ResourceQuotas(namespace)
 			_, err := quotaInterface.Create(sleepQuota)
 			if err != nil && !kerrors.IsAlreadyExists(err) {
-				glog.V(2).Infof("Error creating sleep quota on project %s: %s\n", namespace, err)
+				glog.Errorf("Error creating sleep quota on project %s: %s\n", namespace, err)
 				return
 			}
 			if kerrors.IsAlreadyExists(err) {
@@ -681,7 +1158,7 @@ func (s *Sleeper) SyncProject(namespace string) {
 			}
 			err = s.applyProjectSleep(namespace, project.LastSleepTime, project.LastSleepTime.Add(s.config.ProjectSleepPeriod))
 			if err != nil {
-				glog.V(2).Infof("Error applying project sleep quota: %s\n", err)
+				glog.Errorf("Error applying project sleep quota: %s\n", err)
 			}
 			return
 		} else {
@@ -696,7 +1173,7 @@ func (s *Sleeper) SyncProject(namespace string) {
 		glog.V(2).Infof("Project %s over quota! (%+vs/%+vs)\n", namespace, quotaSecondsConsumed, s.config.Quota.Seconds())
 		err = s.applyProjectSleep(namespace, time.Now(), time.Now().Add(s.config.ProjectSleepPeriod))
 		if err != nil {
-			glog.V(2).Infof("Error applying project sleep quota: %s\n", err)
+			glog.Errorf("Error applying project sleep quota: %s\n", err)
 		}
 		return
 	}
@@ -706,7 +1183,7 @@ func (s *Sleeper) SyncProject(namespace string) {
 	// Maps an RC to if it has been scaled, eg by its DC being scaled
 	rcOverQuota := make(map[string]bool)
 	dcs := make(map[string]time.Duration)
-	namespaceAndKind = namespace + "/" + RCKind
+	namespaceAndKind := namespace + "/" + RCKind
 	rcs, err := s.resources.ByIndex("byNamespaceAndKind", namespaceAndKind)
 	if err != nil {
 		glog.Errorf("Error getting project (%s) RC resources:", namespace, err)
@@ -740,7 +1217,7 @@ func (s *Sleeper) SyncProject(namespace string) {
 	}
 	for _, name := range dcOverQuota {
 		// Scale down dcs that are over quota
-		glog.V(2).Infof("Scaling DC %s in project (%s)\n", name, namespace)
+		glog.V(3).Infof("Scaling DC %s in project (%s)\n", name, namespace)
 
 		// Scale RCs related to DC
 		dcRCs, err := s.resources.ByIndex("rcByDC", name)
@@ -766,7 +1243,7 @@ func (s *Sleeper) SyncProject(namespace string) {
 }
 
 func (s *Sleeper) scaleDownRC(name, namespace string) error {
-	glog.V(2).Infof("Scaling RC %s in project (%s)\n", name, namespace)
+	glog.V(3).Infof("Scaling RC %s in project (%s)\n", name, namespace)
 	thisRC, err := s.kubeClient.ReplicationControllers(namespace).Get(name)
 	if err != nil {
 		return err
@@ -887,11 +1364,5 @@ func getAllResourcesOfKind(obj interface{}) ([]string, error) {
 func indexResourceByNamespaceAndKind(obj interface{}) ([]string, error) {
 	object := obj.(*ResourceObject)
 	fullName := object.Namespace + "/" + object.Kind
-	return []string{fullName}, nil
-}
-
-func indexResourceByFullName(obj interface{}) ([]string, error) {
-	object := obj.(*ResourceObject)
-	fullName := object.Namespace + "/" + object.Kind + "/" + object.Name
 	return []string{fullName}, nil
 }

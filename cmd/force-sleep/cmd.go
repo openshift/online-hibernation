@@ -63,6 +63,8 @@ func main() {
 		os.Exit(1)
 	}
 
+	f := clientcmd.New(pflag.NewFlagSet("empty", pflag.ContinueOnError))
+
 	namespaces := strings.Split(excludeNamespaces, ",")
 	exclude := make(map[string]bool)
 	for _, name := range namespaces {
@@ -78,7 +80,7 @@ func main() {
 		TermQuota:          tQuota,
 		NonTermQuota:       ntQuota,
 	}
-	sleeper := forcesleep.NewSleeper(osClient, kubeClient, sleeperConfig)
+	sleeper := forcesleep.NewSleeper(osClient, kubeClient, sleeperConfig, f)
 	c := make(chan struct{})
 	sleeper.Run(c)
 	<-c
