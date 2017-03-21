@@ -1,6 +1,6 @@
 # Old-skool build tools.
 
-.DEFAULT_GOAL := build
+.DEFAULT_GOAL := help
 
 TAG ?= openshift/force-sleep
 TARGET ?= prod
@@ -69,6 +69,19 @@ verify:
 		github.com/openshift/online/force-sleep/pkg/...
 .PHONY: verify
 
+
+# Prints a list of useful targets.
+help:
+	@echo ""
+	@echo "OpenShift Online Force-Sleep Controller"
+	@echo ""
+	@echo "make build                compile binaries"
+	@echo "make test                 run unit tests"
+	@echo "make release              build release image using Dockerfile"
+	@echo "make test-release         run unit and integration tests in Docker container"
+	@echo "make verify               lint source code"
+	@echo ""
+.PHONY: help
 
 # Checks if a GOPATH is set, or emits an error message
 check-gopath:
