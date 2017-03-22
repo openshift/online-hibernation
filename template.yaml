@@ -118,5 +118,5 @@ objects:
           - -z=$(PROJECT_SLEEP_LENGTH)
           - -w=$(WORKERS)
           - -n=$(EXCLUDE_NAMESPACES)
-	  - -terminating=$(TERMINATING_QUOTA)
-	  - -nonterminating=$(NONTERMINATING_QUOTA)
+          - -terminating=$(TERMINATING_QUOTA)
+          - -nonterminating=$(NONTERMINATING_QUOTA)
