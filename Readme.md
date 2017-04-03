@@ -19,7 +19,7 @@ oc new-app -n openshift-infra \
    -p SYNC_PERIOD=1h \
    -p PROJECT_SLEEP_LENGTH=8h \
    -p WORKERS=10 \
-   -p EXCLUDE_NAMESPACES="openshift,openshift-infra"
+   -p EXCLUDE_NAMESPACES="openshift,openshift-infra,<etc...>" \
    -p TERMINATING_QUOTA=1Gi \
    -p NONTERMINATING_QUOTA=1Gi
 ```
@@ -28,8 +28,8 @@ Building locally:
 `docker build -f Dockerfile.local -t openshift/force-sleep .`
 
 `glog` levels generally follow this structure:
-3: Resource/watch event level messages
-2: Project/sleep level messages
-1: Sleeper/cluster level messages
+* 3: Resource/watch event level messages
+* 2: Project/sleep level messages
+* 1: Sleeper/cluster level messages
 
 (WIP) Ansible role contained in `../ansible/roles/force_sleep/tasks/main.yml`
