@@ -41,6 +41,18 @@ parameters:
   description: Verbosity level for glogging
   value: "3"
 
+- name: METRICS_PORT
+  description: Port to create a service for http metrics requests
+  value: "8080"
+
+- name: METRICS_COLLECT_RUNTIME
+  description: Enable runtime metrics
+  value: "true"
+
+- name: METRICS_COLLECT_CACHE
+  description: Enable controller cache metrics
+  value: "true"
+
 objects:
 # A role for force sleep
 - apiVersion: v1
@@ -71,6 +83,17 @@ objects:
   kind: ServiceAccount
   metadata:
     name: force-sleep
+# A service to expose the metrics server
+- apiVersion: v1
+  kind: Service
+  metadata:
+    name: force-sleep
+  spec:
+    ports:
+    - name: "metrics"
+      protocol: TCP
+      port: ${METRICS_PORT}
+      targetPort: "metrics"
 # Binds the service account to the force sleep role
 - apiVersion: v1
   kind: ClusterRoleBinding
@@ -105,6 +128,10 @@ objects:
         - name: force-sleep
           image: ${FORCE_SLEEP_IMAGE}
           imagePullPolicy: ${IMAGE_PULL_POLICY}
+	  ports:
+          - name: "metrics"
+            containerPort: 8080
+            protocol: TCP
           env:
           - name: QUOTA_HOURS
             value: ${QUOTA_HOURS}
@@ -124,6 +151,10 @@ objects:
             value: ${NONTERMINATING_QUOTA}
           - name: LOG_LEVEL
             value: ${LOG_LEVEL}
+          - name: METRICS_COLLECT_RUNTIME
+            value: ${METRICS_COLLECT_RUNTIME}
+          - name: METRICS_COLLECT_CACHE
+            value: ${METRICS_COLLECT_CACHE}
           command:
           - /go/bin/force-sleep
           - -q=$(QUOTA_HOURS)
@@ -136,3 +167,5 @@ objects:
           - -nonterminating=$(NONTERMINATING_QUOTA)
           - -v=$(LOG_LEVEL)
           - -logtostderr
+          - -collectRuntime=$(METRICS_COLLECT_RUNTIME)
+          - -collectCache=$(METRICS_COLLECT_CACHE)

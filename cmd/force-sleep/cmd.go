@@ -25,6 +25,9 @@ func main() {
 	var quota, period, syncPeriod, projectSleepPeriod time.Duration
 	var workers int
 	var excludeNamespaces, termQuota, nontermQuota string
+	var metricsBindAddr string
+	var collectRuntime, collectCache bool
+
 	flag.DurationVar(&quota, "q", 16*time.Hour, "Maximum quota-hours allowed in period before force sleep")
 	flag.DurationVar(&period, "p", 24*time.Hour, "Length of period in hours for quota consumption")
 	flag.DurationVar(&syncPeriod, "s", 60*time.Minute, "Interval to sync project status")
@@ -33,6 +36,10 @@ func main() {
 	flag.StringVar(&excludeNamespaces, "n", "", "Comma-separated list of namespace to exclude in quota enforcement")
 	flag.StringVar(&termQuota, "terminating", "", "Memory quota for terminating pods")
 	flag.StringVar(&nontermQuota, "nonterminating", "", "Memory quota for non-terminating pods")
+
+	flag.StringVar(&metricsBindAddr, "metricsBindAddr", ":8080", "The address on localhost serving metrics - http://localhost:port/metrics")
+	flag.BoolVar(&collectRuntime, "collectRuntime", true, "Enable runtime metrics")
+	flag.BoolVar(&collectCache, "collectCache", true, "Enable cache metrics")
 	flag.Parse()
 
 	tQuota, err := resource.ParseQuantity(termQuota)
@@ -90,7 +97,26 @@ func main() {
 		TermQuota:          tQuota,
 		NonTermQuota:       ntQuota,
 	}
+
 	sleeper := forcesleep.NewSleeper(sleeperConfig, f, cache)
+
+	// Spawn metrics server
+	go func() {
+		metricsConfig := forcesleep.MetricsConfig{
+			BindAddr:       metricsBindAddr,
+			CollectRuntime: collectRuntime,
+			CollectCache:   collectCache,
+		}
+		server := forcesleep.MetricsServer{
+			Config:     metricsConfig,
+			Controller: sleeper,
+		}
+		err := server.Serve()
+		if err != nil {
+			glog.Errorf("Error running metrics server: %s", err)
+		}
+	}()
+
 	c := make(chan struct{})
 	sleeper.Run(c)
 	<-c
