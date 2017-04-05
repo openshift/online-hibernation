@@ -128,7 +128,7 @@ objects:
         - name: force-sleep
           image: ${FORCE_SLEEP_IMAGE}
           imagePullPolicy: ${IMAGE_PULL_POLICY}
-	  ports:
+          ports:
           - name: "metrics"
             containerPort: 8080
             protocol: TCP

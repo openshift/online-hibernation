@@ -6,3 +6,6 @@ import:
   version: v3.4.0.23
   repo:    git@github.com:openshift/ose.git
   vcs:     git
+
+- package: github.com/prometheus/client_golang/prometheus
+  version: 6373fd93345740fc045eab648524bcbb65c3e690
