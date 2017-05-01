@@ -7,7 +7,10 @@ import (
 	"time"
 
 	"github.com/openshift/origin/pkg/client/testclient"
+	"github.com/openshift/origin/pkg/cmd/util/clientcmd"
 	deployapi "github.com/openshift/origin/pkg/deploy/api"
+
+	"github.com/spf13/pflag"
 
 	kapi "k8s.io/kubernetes/pkg/api"
 	"k8s.io/kubernetes/pkg/api/meta"
@@ -293,9 +296,7 @@ func TestSyncProject(t *testing.T) {
 						runningTime(time.Now().Add(-16*time.Hour), time.Time{}),
 					}),
 			},
-			ExpectedOpenshiftActions: []action{
-				{Verb: "get", Resource: "deploymentconfigs", Name: "dc1"},
-			},
+			ExpectedOpenshiftActions: []action{},
 			ExpectedKubeActions: []action{
 				{Verb: "get", Resource: "replicationcontrollers", Name: "rc1"},
 				{Verb: "update", Resource: "replicationcontrollers"},
@@ -339,9 +340,7 @@ func TestSyncProject(t *testing.T) {
 						runningTime(time.Now().Add(-16*time.Hour), time.Time{}),
 					}),
 			},
-			ExpectedOpenshiftActions: []action{
-				{Verb: "get", Resource: "deploymentconfigs", Name: "dc1"},
-			},
+			ExpectedOpenshiftActions: []action{},
 			ExpectedKubeActions: []action{
 				{Verb: "get", Resource: "replicationcontrollers", Name: "rc1"},
 				{Verb: "get", Resource: "replicationcontrollers", Name: "rc2"},
@@ -413,7 +412,8 @@ func TestSyncProject(t *testing.T) {
 			return true, list, nil
 		})
 
-		s := NewSleeper(oc, kc, config)
+		f := clientcmd.New(pflag.NewFlagSet("empty", pflag.ContinueOnError))
+		s := NewSleeper(oc, kc, config, f)
 
 		for _, resource := range test.Resources {
 			s.resources.Add(resource)
