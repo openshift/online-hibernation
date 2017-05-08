@@ -9,6 +9,7 @@ import (
 
 	osclient "github.com/openshift/origin/pkg/client"
 
+	"github.com/openshift/online/force-sleep/pkg/cache"
 	"github.com/openshift/online/force-sleep/pkg/forcesleep"
 	_ "github.com/openshift/origin/pkg/api/install"
 	"github.com/openshift/origin/pkg/cmd/util/clientcmd"
@@ -45,6 +46,9 @@ func main() {
 		os.Exit(1)
 	}
 
+	/*
+	 * Set up kubernetes and openshift clients
+	 */
 	var kubeClient kclient.Interface
 	var osClient osclient.Interface
 	config, err := clientcmd.DefaultClientConfig(pflag.NewFlagSet("empty", pflag.ContinueOnError)).ClientConfig()
@@ -62,9 +66,15 @@ func main() {
 		glog.V(0).Infof("Error creating Kubernetes client: %s", err)
 		os.Exit(1)
 	}
-
 	f := clientcmd.New(pflag.NewFlagSet("empty", pflag.ContinueOnError))
 
+	/*
+	 * Cache is a shared object that both Sleeper and Idler will hold a reference to and interact with
+	 */
+	cache := cache.NewCache(osClient, kubeClient, f)
+
+	// Create Sleeper
+	// TODO create Idler with similar setup and run in another thread
 	namespaces := strings.Split(excludeNamespaces, ",")
 	exclude := make(map[string]bool)
 	for _, name := range namespaces {
@@ -80,7 +90,7 @@ func main() {
 		TermQuota:          tQuota,
 		NonTermQuota:       ntQuota,
 	}
-	sleeper := forcesleep.NewSleeper(osClient, kubeClient, sleeperConfig, f)
+	sleeper := forcesleep.NewSleeper(osClient, kubeClient, sleeperConfig, f, cache)
 	c := make(chan struct{})
 	sleeper.Run(c)
 	<-c
