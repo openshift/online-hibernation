@@ -5,31 +5,31 @@ metadata:
 parameters:
 - name: QUOTA_HOURS
   description: Maximum quota-hours allowed in period before force sleep
-  value: "16h"
+  value: "4m"
 
 - name: TERMINATING_QUOTA
   description: Quota for terminating pods
-  value: "1Gi"
+  value: "500Mi"
 
 - name: NONTERMINATING_QUOTA
   description: Quota for nonterminating pods
-  value: "1Gi"
+  value: "500Mi"
 
 - name: PERIOD
   description: Length of period in hours for quota consumption
-  value: "24h"
+  value: "5m"
 
 - name: NAME
   description: The name of the DeploymentConfig.
-  value: sleep-idler
+  value: "sleep-idler"
 
 - name: SLEEP_SYNC_PERIOD
   description: Interval to sync project status
-  value: "1h"
+  value: "2m"
 
 - name: PROJECT_SLEEP_LENGTH
   description: Length of time to apply force-sleep to projects over quota.
-  value: "8h"
+  value: "2m"
 
 - name: WORKERS
   description: Number of worker threads to process project sync
@@ -37,15 +37,15 @@ parameters:
 
 - name: EXCLUDE_NAMESPACES
   description: Comma-separated list of namespace to exclude in quota enforcement
-  value: "openshift,openshift-infra,default"
+  value: "management-infra,openshift,openshift-infra,default,logging,kube-system,kube-public"
 
 - name: IDLE_SYNC_PERIOD
   description: Interval to sync project status for idler
-  value: "10m"
+  value: "2m"
 
 - name: IDLE_QUERY_PERIOD
   description: Interval to query project network activity for idler
-  value: "10m"
+  value: "2m"
 
 - name: HAWKULAR_URL
   description: Hawkular API url.
@@ -57,7 +57,7 @@ parameters:
 
 - name: IDLE_THRESHOLD
   description: Network activity received (bytes) or less that will result in idling.
-  value: "20000"
+  value: "5000"
 
 - name: IN_CLUSTER
   description: Boolean for whether sleep-idler is running in the cluster.
@@ -73,11 +73,11 @@ parameters:
 
 - name: FORCE_SLEEP_IMAGE
   description: The force sleep docker image
-  value: openshift/force-sleep:latest
+  value: sleep-idler:local
 
 - name: LOG_LEVEL
   description: Verbosity level for glogging
-  value: "3"
+  value: "2"
 
 - name: METRICS_PORT
   description: Port to create a service for http metrics requests

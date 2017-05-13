@@ -1,23 +1,25 @@
 # Free Tier Force Sleep controller 
 
-FROM rhel7.2:7.2-released
+#FROM rhel7.2:7.2-released
+FROM golang:1.7
 
 ENV PATH=/go/bin:$PATH \
     GOPATH=/go
 
-LABEL com.redhat.component="oso-force-sleep" \
-      name="openshift3/oso-force-sleep" \
-      version="v3.3.0.0" \
-      architecture="x86_64"
+#LABEL com.redhat.component="oso-force-sleep" \
+      #name="openshift3/oso-force-sleep" \
+      #version="v3.3.0.0" \
+      #architecture="x86_64"
 
 ADD . /go/src/github.com/openshift/online/force-sleep
 
-RUN yum-config-manager --enable rhel-7-server-optional-rpms && \
-    INSTALL_PKGS="golang make" && \
-    yum install -y --setopt=tsflags=nodocs $INSTALL_PKGS && \
-    rpm -V $INSTALL_PKGS && \
-    yum clean all -y
+#RUN yum-config-manager --enable rhel-7-server-optional-rpms && \
+    #INSTALL_PKGS="golang make" && \
+    #yum install -y --setopt=tsflags=nodocs $INSTALL_PKGS && \
+    #rpm -V $INSTALL_PKGS && \
+    #yum clean all -y
 
 WORKDIR /go/src/github.com/openshift/online/force-sleep
 RUN make build TARGET=prod
 ENTRYPOINT ["force-sleep"]
+

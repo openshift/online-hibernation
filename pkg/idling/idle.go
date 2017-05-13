@@ -44,44 +44,49 @@ type ControllerScaleReference struct {
 //   4. get endpoint with the same name as the service
 func IdleProjectServices(c *cache.Cache, namespace string) error {
 	failed := false
-	svcs, err := c.GetProjectServices(namespace)
+	services, err := c.GetProjectServices(namespace)
 	if err != nil {
 		return err
 	}
-
 	nowTime := time.Now()
 	// Loop through all of the services in a namespace
-	for _, obj := range svcs {
+	for _, obj := range services {
 		svc := obj.(*cache.ResourceObject)
 		err = AnnotateService(c, svc, nowTime, namespace, FullIdleAnnotations)
 		if err != nil {
 			glog.Errorf("Error idling service: %s", err)
 			failed = true
 		}
+		glog.V(0).Infof("Added service idled-at annotation( %s )", svc.Name)
 	}
 
 	if failed {
 		return errors.New("Failed to idle all project services")
 	}
+	// TODO: What do we do with pods that have no service? If we scale them, they will remain
+	// scaled down until a user manually scales them up again.. for now, only scale pods with
+	// services...
+	if len(services) != 0 {
+		glog.V(2).Infof("Scaling DCs in project %s\n", namespace)
+		err = ScaleProjectDCs(c, namespace)
+		if err != nil {
+			failed = true
+			glog.Errorf("Error scaling DCs in project %s: %s\n", namespace, err)
+		}
 
-	glog.V(2).Infof("Scaling DCs in project %s\n", namespace)
-	err = ScaleProjectDCs(c, namespace)
-	if err != nil {
-		failed = true
-		glog.Errorf("Error scaling DCs in project %s: %s\n", namespace, err)
+		glog.V(2).Infof("Scaling RCs in project %s\n", namespace)
+		err = ScaleProjectRCs(c, namespace)
+		if err != nil {
+			failed = true
+			glog.Errorf("Error scaling RCs in project %s: %s\n", namespace, err)
+		}
+
+		if failed {
+			return fmt.Errorf("Error idling services in project %s\n", namespace)
+		}
+	} else {
+		glog.V(2).Infof("Did not idle resources in project( %s ), no services found", namespace)
 	}
-
-	glog.V(2).Infof("Scaling RCs in project %s\n", namespace)
-	err = ScaleProjectRCs(c, namespace)
-	if err != nil {
-		failed = true
-		glog.Errorf("Error scaling RCs in project %s: %s\n", namespace, err)
-	}
-
-	if failed {
-		return fmt.Errorf("error idling services\n")
-	}
-
 	return nil
 }
 
@@ -119,32 +124,64 @@ func ScaleProjectDCs(c *cache.Cache, namespace string) error {
 }
 
 func ScaleProjectRCs(c *cache.Cache, namespace string) error {
+	failed := false
 	// Scale RCs to 0
 	rcInterface := c.KubeClient.ReplicationControllers(namespace)
 	rcList, err := rcInterface.List(kapi.ListOptions{})
 	if err != nil {
 		return err
 	}
-	failed := false
+
 	for _, thisRC := range rcList.Items {
-		copy, err := kapi.Scheme.DeepCopy(thisRC)
+		rcWDC, err := c.Indexer.ByIndex("dcByRC", thisRC.Name)
 		if err != nil {
 			return err
 		}
-		newRC := copy.(kapi.ReplicationController)
-		newRC.Spec.Replicas = 0
-		_, err = rcInterface.Update(&newRC)
-		if err != nil {
-			if kerrors.IsNotFound(err) {
-				continue
-			} else {
-				glog.Errorf("Error scaling RC in namespace %s: %s\n", namespace, err)
-				failed = true
+		if len(rcWDC) != 0 {
+			copy, err := kapi.Scheme.DeepCopy(thisRC)
+			if err != nil {
+				return err
+			}
+			newRC := copy.(kapi.ReplicationController)
+			newRC.Spec.Replicas = 0
+			_, err = rcInterface.Update(&newRC)
+			if err != nil {
+				if kerrors.IsNotFound(err) {
+					continue
+				} else {
+					glog.Errorf("Error scaling RC in namespace %s: %s\n", namespace, err)
+					failed = true
+				}
 			}
 		}
 	}
 	if failed {
 		return errors.New("Failed to scale all project RCs")
+	}
+	return nil
+}
+
+func DeleteProjectPods(c *cache.Cache, namespace string) error {
+	// Delete running pods.
+	podInterface := c.KubeClient.Pods(namespace)
+	podList, err := podInterface.List(kapi.ListOptions{})
+	if err != nil {
+		return err
+	}
+	failed := false
+	for _, pod := range podList.Items {
+		err = podInterface.Delete(pod.ObjectMeta.Name, &kapi.DeleteOptions{})
+		if err != nil {
+			if kerrors.IsNotFound(err) {
+				continue
+			} else {
+				glog.Errorf("Error deleting pods in namespace %s: %s\n", namespace, err)
+				failed = true
+			}
+		}
+	}
+	if failed {
+		return errors.New("Failed to delete all project pods")
 	}
 	return nil
 }

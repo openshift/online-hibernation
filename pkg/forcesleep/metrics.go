@@ -1,7 +1,6 @@
 package forcesleep
 
 import (
-	"fmt"
 	"net/http"
 	"os"
 
@@ -86,7 +85,7 @@ func (c *SizeCollector) Describe(ch chan<- *prometheus.Desc) {
 }
 
 func (c *SizeCollector) Collect(ch chan<- prometheus.Metric) {
-	size := float64(len(c.controller.resources.ListKeys()))
+	size := float64(len(c.controller.resources.Indexer.ListKeys()))
 	ch <- prometheus.MustNewConstMetric(
 		CacheSizeMetric,
 		prometheus.GaugeValue,
