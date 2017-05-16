@@ -59,6 +59,7 @@ type ResourceObject struct {
 	Selectors         map[string]string
 	Labels            map[string]string
 	Annotations       map[string]string
+	IsAsleep          bool
 }
 
 type RunningTime struct {
@@ -166,6 +167,18 @@ func (c *Cache) ResourceInCache(UID string) bool {
 	return exists
 }
 
+func (c *Cache) GetResourceByKey(UID string) (*ResourceObject, bool, error) {
+	obj, exists, err := c.GetByKey(UID)
+	if err != nil {
+		return nil, false, fmt.Errorf("error getting resource by key: %v", err)
+	}
+	if exists {
+		resource := obj.(*ResourceObject)
+		return resource, true, nil
+	}
+	return nil, false, nil
+}
+
 func NewResourceFromPod(pod *kapi.Pod) *ResourceObject {
 	terminating := false
 	if (pod.Spec.RestartPolicy != kapi.RestartPolicyAlways) && (pod.Spec.ActiveDeadlineSeconds != nil) {
@@ -255,6 +268,7 @@ func NewResourceFromProject(namespace string) *ResourceObject {
 		Kind:             ProjectKind,
 		LastSleepTime:    time.Time{},
 		ProjectSortIndex: 0.0,
+		IsAsleep:         false,
 	}
 }
 
@@ -286,6 +300,19 @@ func (c *Cache) GetProjectPods(namespace string) ([]interface{}, error) {
 		return nil, err
 	}
 	return pods, nil
+}
+
+func (c *Cache) GetProject(namespace string) (*ResourceObject, error) {
+	projObj, err := c.ByIndex("getProject", namespace)
+	if err != nil {
+		return nil, fmt.Errorf("couldn't get project resources: %v", err)
+	}
+	if e, a := 1, len(projObj); e != a {
+		return nil, fmt.Errorf("expected %d project named %s, got %d", e, namespace, a)
+	}
+
+	project := projObj[0].(*ResourceObject)
+	return project, nil
 }
 
 // Takes in a list of locally cached Pod ResourceObjects and a Service ResourceObject

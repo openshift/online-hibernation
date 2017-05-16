@@ -90,7 +90,7 @@ func main() {
 		TermQuota:          tQuota,
 		NonTermQuota:       ntQuota,
 	}
-	sleeper := forcesleep.NewSleeper(osClient, kubeClient, sleeperConfig, f, cache)
+	sleeper := forcesleep.NewSleeper(sleeperConfig, f, cache)
 	c := make(chan struct{})
 	sleeper.Run(c)
 	<-c

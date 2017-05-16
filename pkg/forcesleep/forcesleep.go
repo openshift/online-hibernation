@@ -10,10 +10,8 @@ import (
 	"github.com/openshift/online/force-sleep/pkg/cache"
 	"github.com/openshift/online/force-sleep/pkg/idling"
 
-	osclient "github.com/openshift/origin/pkg/client"
 	oscache "github.com/openshift/origin/pkg/client/cache"
 	"github.com/openshift/origin/pkg/cmd/util/clientcmd"
-	deployapi "github.com/openshift/origin/pkg/deploy/api"
 
 	"github.com/golang/glog"
 
@@ -21,7 +19,6 @@ import (
 	kerrors "k8s.io/kubernetes/pkg/api/errors"
 	"k8s.io/kubernetes/pkg/api/resource"
 	kcache "k8s.io/kubernetes/pkg/client/cache"
-	kclient "k8s.io/kubernetes/pkg/client/unversioned"
 	"k8s.io/kubernetes/pkg/runtime"
 	"k8s.io/kubernetes/pkg/util/wait"
 	"k8s.io/kubernetes/pkg/watch"
@@ -50,8 +47,6 @@ type SleeperConfig struct {
 }
 
 type Sleeper struct {
-	kubeClient        kclient.Interface
-	osClient          osclient.Interface
 	factory           *clientcmd.Factory
 	config            *SleeperConfig
 	resources         *cache.Cache
@@ -59,18 +54,11 @@ type Sleeper struct {
 	stopChannel       <-chan struct{}
 }
 
-type watchListItem struct {
-	objType   runtime.Object
-	watchFunc func(options kapi.ListOptions) (watch.Interface, error)
-}
-
-func NewSleeper(osClient osclient.Interface, kubeClient kclient.Interface, sc *SleeperConfig, f *clientcmd.Factory, c *cache.Cache) *Sleeper {
+func NewSleeper(sc *SleeperConfig, f *clientcmd.Factory, c *cache.Cache) *Sleeper {
 	ctrl := &Sleeper{
-		osClient:   osClient,
-		kubeClient: kubeClient,
-		config:     sc,
-		factory:    f,
-		resources:  c,
+		config:    sc,
+		factory:   f,
+		resources: c,
 	}
 	quota, err := ctrl.createSleepResources()
 	if err != nil {
@@ -145,13 +133,14 @@ func (s *Sleeper) startResource(r *cache.ResourceObject) {
 	}
 
 	// Make sure object was successfully created before working on it
-	obj, exists, err := s.resources.GetByKey(UID)
+	obj, exists, err := s.resources.GetResourceByKey(UID)
+	res, err := kapi.Scheme.DeepCopy(obj)
 	if err != nil {
-		glog.Errorf("Error starting resource by UID: %s", err)
+		glog.Errorf("couldn't copy resource from cache: %v", err)
 		return
 	}
 	if exists {
-		resource := obj.(*cache.ResourceObject)
+		resource := res.(*cache.ResourceObject)
 		glog.V(3).Infof("Starting resource: %s\n", resource.Name)
 		if !resource.IsStarted() {
 			runTime := &cache.RunningTime{
@@ -190,13 +179,14 @@ func (s *Sleeper) stopResource(r *cache.ResourceObject) {
 		stopTime = now
 	}
 
-	obj, exists, err := s.resources.GetByKey(UID)
+	obj, exists, err := s.resources.GetResourceByKey(UID)
+	res, err := kapi.Scheme.DeepCopy(obj)
 	if err != nil {
-		glog.Errorf("Error stopping resource by UID: %s", err)
+		glog.Errorf("couldn't copy resource from cache: %v", err)
 		return
 	}
 	if exists {
-		resource := obj.(*cache.ResourceObject)
+		resource := res.(*cache.ResourceObject)
 		glog.V(3).Infof("Stopping resource: %s\n", resource.Name)
 		runTimeCount := len(resource.RunningTimes)
 
@@ -298,27 +288,30 @@ func (s *Sleeper) startWorker(namespaces <-chan string) {
 }
 
 func (s *Sleeper) applyProjectSleep(namespace string, sleepTime, wakeTime time.Time) error {
-	obj, err := s.resources.ByIndex("getProject", namespace)
+	proj, err := s.resources.GetProject(namespace)
 	if err != nil {
 		return err
 	}
-	if len(obj) == 1 {
-		glog.V(2).Infof("Adding sleep quota for project %s\n", namespace)
-		project := obj[0].(*cache.ResourceObject)
-		// TODO: Change this to a deep copy to avoid mutating the indexed object
-		project.LastSleepTime = sleepTime
-		err = s.resources.Update(project)
-		if err != nil {
-			glog.Errorf("Error setting LastSleepTime for project %s: %s\n", namespace, err)
-		}
+	projectCopy, err := kapi.Scheme.DeepCopy(proj)
+	if err != nil {
+		return fmt.Errorf("couldn't copy project from cache: %v", err)
+	}
+	project := projectCopy.(*cache.ResourceObject)
 
-		quotaInterface := s.resources.KubeClient.ResourceQuotas(namespace)
-		quota := s.projectSleepQuota.(*kapi.ResourceQuota)
-		_, err := quotaInterface.Create(quota)
-		if err != nil {
-			return err
-		}
+	glog.V(2).Infof("Adding sleep quota for project %s\n", namespace)
+	// TODO: Change this to a deep copy to avoid mutating the indexed object
+	project.LastSleepTime = sleepTime
+	project.IsAsleep = true
+	err = s.resources.Update(project)
+	if err != nil {
+		glog.Errorf("Error setting LastSleepTime for project %s: %s\n", namespace, err)
+	}
 
+	quotaInterface := s.resources.KubeClient.ResourceQuotas(namespace)
+	quota := s.projectSleepQuota.(*kapi.ResourceQuota)
+	_, err = quotaInterface.Create(quota)
+	if err != nil {
+		return err
 	}
 
 	failed := false
@@ -331,14 +324,14 @@ func (s *Sleeper) applyProjectSleep(namespace string, sleepTime, wakeTime time.T
 	}
 
 	glog.V(2).Infof("Scaling DCs in project %s\n", namespace)
-	err = s.scaleProjectDCs(namespace)
+	err = idling.ScaleProjectDCs(s.resources, namespace)
 	if err != nil {
 		failed = true
 		glog.Errorf("Error scaling DCs in project %s: %s\n", namespace, err)
 	}
 
 	glog.V(2).Infof("Scaling RCs in project %s\n", namespace)
-	err = s.scaleProjectRCs(namespace)
+	err = idling.ScaleProjectRCs(s.resources, namespace)
 	if err != nil {
 		failed = true
 		glog.Errorf("Error scaling RCs in project %s: %s\n", namespace, err)
@@ -373,70 +366,6 @@ func (s *Sleeper) clearProjectCache(namespace string) error {
 		if r.Kind != ProjectKind && r.Kind != ServiceKind {
 			s.resources.Delete(r)
 		}
-	}
-	return nil
-}
-
-func (s *Sleeper) scaleProjectDCs(namespace string) error {
-	dcInterface := s.resources.OsClient.DeploymentConfigs(namespace)
-	dcList, err := dcInterface.List(kapi.ListOptions{})
-	if err != nil {
-		return err
-	}
-
-	failed := false
-	for _, dc := range dcList.Items {
-		// Scale down DC
-		copy, err := kapi.Scheme.DeepCopy(dc)
-		if err != nil {
-			return err
-		}
-		newDC := copy.(deployapi.DeploymentConfig)
-		newDC.Spec.Replicas = 0
-		_, err = dcInterface.Update(&newDC)
-		if err != nil {
-			if kerrors.IsNotFound(err) {
-				continue
-			} else {
-				glog.Errorf("Error scaling DC in namespace %s: %s\n", namespace, err)
-				failed = true
-			}
-		}
-
-	}
-	if failed {
-		return errors.New("Failed to scale all project DCs")
-	}
-	return nil
-}
-
-func (s *Sleeper) scaleProjectRCs(namespace string) error {
-	// Scale RCs to 0
-	rcInterface := s.resources.KubeClient.ReplicationControllers(namespace)
-	rcList, err := rcInterface.List(kapi.ListOptions{})
-	if err != nil {
-		return err
-	}
-	failed := false
-	for _, thisRC := range rcList.Items {
-		copy, err := kapi.Scheme.DeepCopy(thisRC)
-		if err != nil {
-			return err
-		}
-		newRC := copy.(kapi.ReplicationController)
-		newRC.Spec.Replicas = 0
-		_, err = rcInterface.Update(&newRC)
-		if err != nil {
-			if kerrors.IsNotFound(err) {
-				continue
-			} else {
-				glog.Errorf("Error scaling RC in namespace %s: %s\n", namespace, err)
-				failed = true
-			}
-		}
-	}
-	if failed {
-		return errors.New("Failed to scale all project RCs")
 	}
 	return nil
 }
@@ -482,7 +411,15 @@ func (s *Sleeper) wakeProject(project *cache.ResourceObject) bool {
 					glog.Errorf("Error removing sleep quota: %s", err)
 				}
 			}
+			projectCopy, err := kapi.Scheme.DeepCopy(project)
+			if err != nil {
+				glog.Errorf("couldn't copy project from cache: %v", err)
+				return false
+			}
+			project = projectCopy.(*cache.ResourceObject)
+
 			project.LastSleepTime = time.Time{}
+			project.IsAsleep = false
 			s.resources.Update(project)
 
 			glog.V(2).Infof("Adding project Idled-At annotations")
@@ -511,13 +448,13 @@ func (s *Sleeper) SyncProject(namespace string) {
 	if s.config.Exclude[namespace] {
 		return
 	}
+
 	glog.V(2).Infof("Syncing project: %s\n", namespace)
-	projObj, err := s.resources.ByIndex("getProject", namespace)
+	project, err := s.resources.GetProject(namespace)
 	if err != nil {
-		glog.Errorf("Error getting project resources: %s", err)
+		glog.Errorf("Error getting project (%s):", namespace, err)
 		return
 	}
-	project := projObj[0].(*cache.ResourceObject)
 
 	// Iterate through pods to calculate runtimes
 	pods, err := s.resources.GetProjectPods(namespace)
@@ -531,9 +468,16 @@ func (s *Sleeper) SyncProject(namespace string) {
 		if s.PruneResource(pod) {
 			continue
 		}
-		totalRuntime, changed := pod.GetResourceRuntime(s.config.Period)
+
+		p, err := kapi.Scheme.DeepCopy(pod)
+		if err != nil {
+			glog.Errorf("couldn't copy pod from cache: %v", err)
+			return
+		}
+		newPod := p.(*cache.ResourceObject)
+		totalRuntime, changed := newPod.GetResourceRuntime(s.config.Period)
 		if changed {
-			s.resources.Update(pod)
+			s.resources.Update(newPod)
 		}
 		seconds := float64(totalRuntime.Seconds())
 		memoryLimit := s.memoryQuota(namespace, pod)
@@ -600,18 +544,22 @@ func (s *Sleeper) scaleDownRC(name, namespace string) error {
 }
 
 func (s *Sleeper) updateProjectSortIndex(namespace string, quotaSeconds float64) {
-	obj, err := s.resources.ByIndex("getProject", namespace)
+	proj, err := s.resources.GetProject(namespace)
 	if err != nil {
 		glog.Errorf("Error getting project resources: %s", err)
 	}
 
-	if len(obj) == 1 {
-		project := obj[0].(*cache.ResourceObject)
-		// Projects closer to force-sleep will have a lower index value
-		sortIndex := -1 * quotaSeconds
-		project.ProjectSortIndex = sortIndex
-		s.resources.Update(project)
+	projectCopy, err := kapi.Scheme.DeepCopy(proj)
+	if err != nil {
+		glog.Errorf("couldn't copy project from cache: %v", err)
+		return
 	}
+	project := projectCopy.(*cache.ResourceObject)
+
+	// Projects closer to force-sleep will have a lower index value
+	sortIndex := -1 * quotaSeconds
+	project.ProjectSortIndex = sortIndex
+	s.resources.Update(project)
 }
 
 // Check to clear cached resources whose runtimes are outside of the period, and thus irrelevant

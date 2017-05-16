@@ -63,6 +63,89 @@ func IdleProjectServices(c *cache.Cache, namespace string) error {
 	if failed {
 		return errors.New("Failed to idle all project services")
 	}
+
+	glog.V(2).Infof("Scaling DCs in project %s\n", namespace)
+	err = ScaleProjectDCs(c, namespace)
+	if err != nil {
+		failed = true
+		glog.Errorf("Error scaling DCs in project %s: %s\n", namespace, err)
+	}
+
+	glog.V(2).Infof("Scaling RCs in project %s\n", namespace)
+	err = ScaleProjectRCs(c, namespace)
+	if err != nil {
+		failed = true
+		glog.Errorf("Error scaling RCs in project %s: %s\n", namespace, err)
+	}
+
+	if failed {
+		return fmt.Errorf("error idling services\n")
+	}
+
+	return nil
+}
+
+func ScaleProjectDCs(c *cache.Cache, namespace string) error {
+	dcInterface := c.OsClient.DeploymentConfigs(namespace)
+	dcList, err := dcInterface.List(kapi.ListOptions{})
+	if err != nil {
+		return err
+	}
+
+	failed := false
+	for _, dc := range dcList.Items {
+		// Scale down DC
+		copy, err := kapi.Scheme.DeepCopy(dc)
+		if err != nil {
+			return err
+		}
+		newDC := copy.(deployapi.DeploymentConfig)
+		newDC.Spec.Replicas = 0
+		_, err = dcInterface.Update(&newDC)
+		if err != nil {
+			if kerrors.IsNotFound(err) {
+				continue
+			} else {
+				glog.Errorf("Error scaling DC in namespace %s: %s\n", namespace, err)
+				failed = true
+			}
+		}
+
+	}
+	if failed {
+		return errors.New("Failed to scale all project DCs")
+	}
+	return nil
+}
+
+func ScaleProjectRCs(c *cache.Cache, namespace string) error {
+	// Scale RCs to 0
+	rcInterface := c.KubeClient.ReplicationControllers(namespace)
+	rcList, err := rcInterface.List(kapi.ListOptions{})
+	if err != nil {
+		return err
+	}
+	failed := false
+	for _, thisRC := range rcList.Items {
+		copy, err := kapi.Scheme.DeepCopy(thisRC)
+		if err != nil {
+			return err
+		}
+		newRC := copy.(kapi.ReplicationController)
+		newRC.Spec.Replicas = 0
+		_, err = rcInterface.Update(&newRC)
+		if err != nil {
+			if kerrors.IsNotFound(err) {
+				continue
+			} else {
+				glog.Errorf("Error scaling RC in namespace %s: %s\n", namespace, err)
+				failed = true
+			}
+		}
+	}
+	if failed {
+		return errors.New("Failed to scale all project RCs")
+	}
 	return nil
 }
 
@@ -217,6 +300,9 @@ func AnnotateController(c *cache.Cache, ref kapi.ObjectReference, nowTime time.T
 		}
 		newDC := copy.(*deployapi.DeploymentConfig)
 		replicas = controller.Spec.Replicas
+		if newDC.Annotations == nil {
+			newDC.Annotations = make(map[string]string)
+		}
 		switch annotation {
 		case FullIdleAnnotations:
 			newDC.Annotations[unidlingapi.PreviousScaleAnnotation] = fmt.Sprintf("%v", controller.Spec.Replicas)
@@ -247,7 +333,9 @@ func AnnotateController(c *cache.Cache, ref kapi.ObjectReference, nowTime time.T
 		}
 		newRC := copy.(*kapi.ReplicationController)
 		replicas = controller.Spec.Replicas
-
+		if newRC.Annotations == nil {
+			newRC.Annotations = make(map[string]string)
+		}
 		switch annotation {
 		case FullIdleAnnotations:
 			newRC.Annotations[unidlingapi.PreviousScaleAnnotation] = fmt.Sprintf("%v", controller.Spec.Replicas)
