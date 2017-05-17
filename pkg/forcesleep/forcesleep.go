@@ -13,6 +13,7 @@ import (
 	osclient "github.com/openshift/origin/pkg/client"
 	oscache "github.com/openshift/origin/pkg/client/cache"
 	"github.com/openshift/origin/pkg/cmd/util/clientcmd"
+	deployapi "github.com/openshift/origin/pkg/deploy/api"
 
 	"github.com/golang/glog"
 
@@ -96,30 +97,30 @@ func (s *Sleeper) WatchForEvents() {
 
 	podLW := &kcache.ListWatch{
 		ListFunc: func(options kapi.ListOptions) (runtime.Object, error) {
-			return s.kubeClient.Pods(kapi.NamespaceAll).List(options)
+			return s.resources.KubeClient.Pods(kapi.NamespaceAll).List(options)
 		},
 		WatchFunc: func(options kapi.ListOptions) (watch.Interface, error) {
-			return s.kubeClient.Pods(kapi.NamespaceAll).Watch(options)
+			return s.resources.KubeClient.Pods(kapi.NamespaceAll).Watch(options)
 		},
 	}
 	kcache.NewReflector(podLW, &kapi.Pod{}, eventQueue, 0).Run()
 
 	rcLW := &kcache.ListWatch{
 		ListFunc: func(options kapi.ListOptions) (runtime.Object, error) {
-			return s.kubeClient.ReplicationControllers(kapi.NamespaceAll).List(options)
+			return s.resources.KubeClient.ReplicationControllers(kapi.NamespaceAll).List(options)
 		},
 		WatchFunc: func(options kapi.ListOptions) (watch.Interface, error) {
-			return s.kubeClient.ReplicationControllers(kapi.NamespaceAll).Watch(options)
+			return s.resources.KubeClient.ReplicationControllers(kapi.NamespaceAll).Watch(options)
 		},
 	}
 	kcache.NewReflector(rcLW, &kapi.ReplicationController{}, eventQueue, 0).Run()
 
 	svcLW := &kcache.ListWatch{
 		ListFunc: func(options kapi.ListOptions) (runtime.Object, error) {
-			return s.kubeClient.Services(kapi.NamespaceAll).List(options)
+			return s.resources.KubeClient.Services(kapi.NamespaceAll).List(options)
 		},
 		WatchFunc: func(options kapi.ListOptions) (watch.Interface, error) {
-			return s.kubeClient.Services(kapi.NamespaceAll).Watch(options)
+			return s.resources.KubeClient.Services(kapi.NamespaceAll).Watch(options)
 		},
 	}
 	kcache.NewReflector(svcLW, &kapi.Service{}, eventQueue, 0).Run()
@@ -311,7 +312,7 @@ func (s *Sleeper) applyProjectSleep(namespace string, sleepTime, wakeTime time.T
 			glog.Errorf("Error setting LastSleepTime for project %s: %s\n", namespace, err)
 		}
 
-		quotaInterface := s.kubeClient.ResourceQuotas(namespace)
+		quotaInterface := s.resources.KubeClient.ResourceQuotas(namespace)
 		quota := s.projectSleepQuota.(*kapi.ResourceQuota)
 		_, err := quotaInterface.Create(quota)
 		if err != nil {
@@ -329,18 +330,18 @@ func (s *Sleeper) applyProjectSleep(namespace string, sleepTime, wakeTime time.T
 		glog.Errorf("Error idling services in project %s: %s\n", namespace, err)
 	}
 
-	glog.V(2).Infof("Scaling RCs in project %s\n", namespace)
-	err = s.scaleProjectRCs(namespace)
-	if err != nil {
-		failed = true
-		glog.Errorf("Error scaling RCs in project %s: %s\n", namespace, err)
-	}
-
 	glog.V(2).Infof("Scaling DCs in project %s\n", namespace)
 	err = s.scaleProjectDCs(namespace)
 	if err != nil {
 		failed = true
 		glog.Errorf("Error scaling DCs in project %s: %s\n", namespace, err)
+	}
+
+	glog.V(2).Infof("Scaling RCs in project %s\n", namespace)
+	err = s.scaleProjectRCs(namespace)
+	if err != nil {
+		failed = true
+		glog.Errorf("Error scaling RCs in project %s: %s\n", namespace, err)
 	}
 
 	glog.V(2).Infof("Deleting pods in project %s\n", namespace)
@@ -377,7 +378,7 @@ func (s *Sleeper) clearProjectCache(namespace string) error {
 }
 
 func (s *Sleeper) scaleProjectDCs(namespace string) error {
-	dcInterface := s.osClient.DeploymentConfigs(namespace)
+	dcInterface := s.resources.OsClient.DeploymentConfigs(namespace)
 	dcList, err := dcInterface.List(kapi.ListOptions{})
 	if err != nil {
 		return err
@@ -386,8 +387,13 @@ func (s *Sleeper) scaleProjectDCs(namespace string) error {
 	failed := false
 	for _, dc := range dcList.Items {
 		// Scale down DC
-		dc.Spec.Replicas = 0
-		_, err = dcInterface.Update(&dc)
+		copy, err := kapi.Scheme.DeepCopy(dc)
+		if err != nil {
+			return err
+		}
+		newDC := copy.(deployapi.DeploymentConfig)
+		newDC.Spec.Replicas = 0
+		_, err = dcInterface.Update(&newDC)
 		if err != nil {
 			if kerrors.IsNotFound(err) {
 				continue
@@ -406,15 +412,20 @@ func (s *Sleeper) scaleProjectDCs(namespace string) error {
 
 func (s *Sleeper) scaleProjectRCs(namespace string) error {
 	// Scale RCs to 0
-	rcInterface := s.kubeClient.ReplicationControllers(namespace)
+	rcInterface := s.resources.KubeClient.ReplicationControllers(namespace)
 	rcList, err := rcInterface.List(kapi.ListOptions{})
 	if err != nil {
 		return err
 	}
 	failed := false
 	for _, thisRC := range rcList.Items {
-		thisRC.Spec.Replicas = 0
-		_, err = rcInterface.Update(&thisRC)
+		copy, err := kapi.Scheme.DeepCopy(thisRC)
+		if err != nil {
+			return err
+		}
+		newRC := copy.(kapi.ReplicationController)
+		newRC.Spec.Replicas = 0
+		_, err = rcInterface.Update(&newRC)
 		if err != nil {
 			if kerrors.IsNotFound(err) {
 				continue
@@ -432,7 +443,7 @@ func (s *Sleeper) scaleProjectRCs(namespace string) error {
 
 func (s *Sleeper) deleteProjectPods(namespace string) error {
 	// Delete running pods.
-	podInterface := s.kubeClient.Pods(namespace)
+	podInterface := s.resources.KubeClient.Pods(namespace)
 	podList, err := podInterface.List(kapi.ListOptions{})
 	if err != nil {
 		return err
@@ -462,7 +473,7 @@ func (s *Sleeper) wakeProject(project *cache.ResourceObject) bool {
 		if time.Since(project.LastSleepTime) > s.config.ProjectSleepPeriod {
 			// First remove the force-sleep pod count resource quota from the project
 			glog.V(2).Infof("Removing sleep quota for project %s\n", namespace)
-			quotaInterface := s.kubeClient.ResourceQuotas(namespace)
+			quotaInterface := s.resources.KubeClient.ResourceQuotas(namespace)
 			err := quotaInterface.Delete(ProjectSleepQuotaName)
 			if err != nil {
 				if kerrors.IsNotFound(err) {
@@ -474,6 +485,7 @@ func (s *Sleeper) wakeProject(project *cache.ResourceObject) bool {
 			project.LastSleepTime = time.Time{}
 			s.resources.Update(project)
 
+			glog.V(2).Infof("Adding project Idled-At annotations")
 			err = idling.AddProjectIdledAtAnnotation(s.resources, namespace, nowTime)
 			if err != nil {
 				glog.Errorf("Error applying service unidling: %s", err)
@@ -538,7 +550,7 @@ func (s *Sleeper) SyncProject(namespace string) {
 	if !project.LastSleepTime.IsZero() {
 		if time.Since(project.LastSleepTime) < s.config.ProjectSleepPeriod {
 			sleepQuota := s.projectSleepQuota.(*kapi.ResourceQuota)
-			quotaInterface := s.kubeClient.ResourceQuotas(namespace)
+			quotaInterface := s.resources.KubeClient.ResourceQuotas(namespace)
 			_, err := quotaInterface.Create(sleepQuota)
 			if err != nil && !kerrors.IsAlreadyExists(err) {
 				glog.Errorf("Error creating sleep quota on project %s: %s\n", namespace, err)
@@ -635,12 +647,12 @@ func (s *Sleeper) SyncProject(namespace string) {
 
 func (s *Sleeper) scaleDownRC(name, namespace string) error {
 	glog.V(3).Infof("Scaling RC %s in project (%s)\n", name, namespace)
-	thisRC, err := s.kubeClient.ReplicationControllers(namespace).Get(name)
+	thisRC, err := s.resources.KubeClient.ReplicationControllers(namespace).Get(name)
 	if err != nil {
 		return err
 	}
 	thisRC.Spec.Replicas = 0
-	_, err = s.kubeClient.ReplicationControllers(namespace).Update(thisRC)
+	_, err = s.resources.KubeClient.ReplicationControllers(namespace).Update(thisRC)
 	if err != nil {
 		return err
 	}
