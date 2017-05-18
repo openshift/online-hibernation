@@ -581,66 +581,6 @@ func (s *Sleeper) SyncProject(namespace string) {
 		return
 	}
 
-	// Iterate through RCs to calculate runtime
-	var dcOverQuota []string
-	// Maps an RC to if it has been scaled, eg by its DC being scaled
-	rcOverQuota := make(map[string]bool)
-	dcs := make(map[string]time.Duration)
-	namespaceAndKind := namespace + "/" + RCKind
-	rcs, err := s.resources.ByIndex("byNamespaceAndKind", namespaceAndKind)
-	if err != nil {
-		glog.Errorf("Error getting project (%s) RC resources:", namespace, err)
-		return
-	}
-	for _, obj := range rcs {
-		rc := obj.(*cache.ResourceObject)
-		if s.PruneResource(rc) {
-			continue
-		}
-		totalRuntime, changed := rc.GetResourceRuntime(s.config.Period)
-		if changed {
-			s.resources.Update(rc)
-		}
-		if totalRuntime >= s.config.Quota {
-			glog.V(2).Infof("RC %s over quota in project %s\n", rc.Name, namespace)
-			rcOverQuota[rc.Name] = true
-		}
-		if _, ok := dcs[rc.DeploymentConfig]; ok {
-			dcs[rc.DeploymentConfig] += totalRuntime
-		} else {
-			dcs[rc.DeploymentConfig] = totalRuntime
-		}
-	}
-	// Iterate through DCs to calculate cumulative runtime
-	for dc, runningTime := range dcs {
-		if runningTime >= s.config.Quota {
-			glog.V(2).Infof("DC %s over quota in project %s\n", dc, namespace)
-			dcOverQuota = append(dcOverQuota, dc)
-		}
-	}
-	for _, name := range dcOverQuota {
-		// Scale down dcs that are over quota
-		glog.V(3).Infof("Scaling DC %s in project (%s)\n", name, namespace)
-
-		// Scale RCs related to DC
-		dcRCs, err := s.resources.ByIndex("rcByDC", name)
-		if err != nil {
-			glog.Errorf("Error getting RCs for DC %s: %s", name, err)
-		}
-		for _, obj := range dcRCs {
-			rc := obj.(*cache.ResourceObject)
-			rcOverQuota[rc.Name] = true
-		}
-	}
-	for name := range rcOverQuota {
-		// Scale down dcs that are over quota
-		err = s.scaleDownRC(name, namespace)
-		if err != nil {
-			glog.Errorf("Error scaling RC %s: %s", name, err)
-			continue
-		}
-	}
-
 	// Project sort index:
 	s.updateProjectSortIndex(namespace, quotaSecondsConsumed)
 }

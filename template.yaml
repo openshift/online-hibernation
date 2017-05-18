@@ -36,7 +36,10 @@ parameters:
 - name: FORCE_SLEEP_IMAGE
   description: The force sleep docker image
   value: openshift/force-sleep:latest
-  
+
+- name: LOG_LEVEL
+  description: Verbosity level for glogging
+  value: "3"
 objects:
 # A role for force sleep
 - apiVersion: v1
@@ -52,6 +55,7 @@ objects:
     - deploymentconfigs
     - resourcequotas
     - services
+    - endpoints
     verbs:
     - watch
     - get
@@ -115,6 +119,8 @@ objects:
             value: ${TERMINATING_QUOTA}
           - name: NONTERMINATING_QUOTA
             value: ${NONTERMINATING_QUOTA}
+          - name: LOG_LEVEL
+            value: ${LOG_LEVEL}
           command:
           - /go/bin/force-sleep
           - -q=$(QUOTA_HOURS)
@@ -125,3 +131,5 @@ objects:
           - -n=$(EXCLUDE_NAMESPACES)
           - -terminating=$(TERMINATING_QUOTA)
           - -nonterminating=$(NONTERMINATING_QUOTA)
+          - -v=$(LOG_LEVEL)
+          - -logtostderr
