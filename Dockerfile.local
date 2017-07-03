@@ -1,7 +1,0 @@
-FROM golang:1.7
-
-ADD . /go/src/github.com/openshift/online/force-sleep
-
-WORKDIR /go/src/github.com/openshift/online/force-sleep
-RUN make build TARGET=dev
-ENTRYPOINT ["force-sleep"]
