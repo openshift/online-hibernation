@@ -36,6 +36,7 @@ type SleeperConfig struct {
 	Exclude            map[string]bool
 	TermQuota          resource.Quantity
 	NonTermQuota       resource.Quantity
+	DryRun             bool
 }
 
 type Sleeper struct {
@@ -96,6 +97,10 @@ func (s *Sleeper) startWorker(namespaces <-chan string) {
 }
 
 func (s *Sleeper) applyProjectSleep(namespace string, sleepTime, wakeTime time.Time) error {
+	if s.config.DryRun {
+		glog.V(2).Infof("(Force-sleep/dry run) Simulating project sleep in dry run mode")
+	}
+
 	proj, err := s.resources.GetProject(namespace)
 	if err != nil {
 		return err
@@ -121,51 +126,55 @@ func (s *Sleeper) applyProjectSleep(namespace string, sleepTime, wakeTime time.T
 	if !sleepingProj.IsAsleep {
 		panic("Project is not set to 'IsAsleep' in cache")
 	}
-	quotaInterface := s.resources.KubeClient.ResourceQuotas(namespace)
-	quota := s.projectSleepQuota.(*kapi.ResourceQuota)
-	_, err = quotaInterface.Create(quota)
-	if err != nil {
-		return err
-	}
 
-	failed := false
+	// Do not make any quota, idling, or scaling changes in dry-run mode
+	if !s.config.DryRun {
+		quotaInterface := s.resources.KubeClient.ResourceQuotas(namespace)
+		quota := s.projectSleepQuota.(*kapi.ResourceQuota)
+		_, err = quotaInterface.Create(quota)
+		if err != nil {
+			return err
+		}
 
-	glog.V(2).Infof("Force-sleeper: Annotating services in project %s.\n", namespace)
-	err = idling.AddProjectPreviousScaleAnnotation(s.resources, namespace)
-	if err != nil {
-		failed = true
-		glog.Errorf("Force-sleeper: Error annotating services in project %s: %s\n", namespace, err)
-	}
+		failed := false
 
-	glog.V(2).Infof("Force-sleeper: Scaling DCs in project %s\n", namespace)
-	err = idling.ScaleProjectDCs(s.resources, namespace)
-	if err != nil {
-		failed = true
-		glog.Errorf("Force-sleeper: Error scaling DCs in project %s: %s\n", namespace, err)
-	}
+		glog.V(2).Infof("Force-sleeper: Annotating services in project %s.\n", namespace)
+		err = idling.AddProjectPreviousScaleAnnotation(s.resources, namespace)
+		if err != nil {
+			failed = true
+			glog.Errorf("Force-sleeper: Error annotating services in project %s: %s\n", namespace, err)
+		}
 
-	glog.V(2).Infof("Force-sleeper: Scaling RCs in project %s\n", namespace)
-	err = idling.ScaleProjectRCs(s.resources, namespace)
-	if err != nil {
-		failed = true
-		glog.Errorf("Force-sleeper: Error scaling RCs in project %s: %s\n", namespace, err)
-	}
+		glog.V(2).Infof("Force-sleeper: Scaling DCs in project %s\n", namespace)
+		err = idling.ScaleProjectDCs(s.resources, namespace)
+		if err != nil {
+			failed = true
+			glog.Errorf("Force-sleeper: Error scaling DCs in project %s: %s\n", namespace, err)
+		}
 
-	glog.V(2).Infof("Force-sleeper: Deleting pods in project %s\n", namespace)
-	err = s.deleteProjectPods(namespace)
-	if err != nil {
-		failed = true
-		glog.Errorf("Force-sleeper: Error deleting pods in project %s: %s\n", namespace, err)
-	}
+		glog.V(2).Infof("Force-sleeper: Scaling RCs in project %s\n", namespace)
+		err = idling.ScaleProjectRCs(s.resources, namespace)
+		if err != nil {
+			failed = true
+			glog.Errorf("Force-sleeper: Error scaling RCs in project %s: %s\n", namespace, err)
+		}
 
-	glog.V(2).Infof("Force-sleeper: Clearing cache for project %s\n", namespace)
-	err = s.clearProjectCache(namespace)
-	if err != nil {
-		failed = true
-		glog.Errorf("Force-sleeper: Error clearing cache in project %s: %s\n", namespace, err)
-	}
-	if failed {
-		glog.Errorf("Force-sleeper: Error applying sleep for project %s\n", namespace)
+		glog.V(2).Infof("Force-sleeper: Deleting pods in project %s\n", namespace)
+		err = s.deleteProjectPods(namespace)
+		if err != nil {
+			failed = true
+			glog.Errorf("Force-sleeper: Error deleting pods in project %s: %s\n", namespace, err)
+		}
+
+		glog.V(2).Infof("Force-sleeper: Clearing cache for project %s\n", namespace)
+		err = s.clearProjectCache(namespace)
+		if err != nil {
+			failed = true
+			glog.Errorf("Force-sleeper: Error clearing cache in project %s: %s\n", namespace, err)
+		}
+		if failed {
+			glog.Errorf("Force-sleeper: Error applying sleep for project %s\n", namespace)
+		}
 	}
 	return nil
 }
@@ -210,22 +219,37 @@ func (s *Sleeper) deleteProjectPods(namespace string) error {
 }
 
 func (s *Sleeper) wakeProject(project *cache.ResourceObject) bool {
+	if s.config.DryRun {
+		glog.V(2).Infof("(Force-sleep/dry run) Simulating project wake in dry run mode")
+	}
 	nowTime := time.Now()
 	namespace := project.Namespace
 	if !project.LastSleepTime.IsZero() {
 		if time.Since(project.LastSleepTime) > s.config.ProjectSleepPeriod {
 			// First remove the force-sleep pod count resource quota from the project
 			glog.V(2).Infof("Force-sleeper: Removing sleep quota for project %s.\n", namespace)
-			quotaInterface := s.resources.KubeClient.ResourceQuotas(namespace)
-			err := quotaInterface.Delete(ProjectSleepQuotaName)
-			if err != nil {
-				if kerrors.IsNotFound(err) {
-					glog.V(2).Infof("Force-sleeper: Error removing sleep quota: %s", err)
-				} else {
-					glog.Errorf("Force-sleeper: Error removing sleep quota: %s", err)
+			if !s.config.DryRun {
+				quotaInterface := s.resources.KubeClient.ResourceQuotas(namespace)
+				err := quotaInterface.Delete(ProjectSleepQuotaName)
+				if err != nil {
+					if kerrors.IsNotFound(err) {
+						glog.V(2).Infof("Force-sleeper: Error removing sleep quota: %s", err)
+					} else {
+						glog.Errorf("Force-sleeper: Error removing sleep quota: %s", err)
+					}
+				}
+
+				glog.V(2).Infof("Force-sleeper: Adding project( %s )Idled-At annotations.\n", namespace)
+				err = idling.AddProjectIdledAtAnnotation(s.resources, namespace, nowTime)
+				if err != nil {
+					glog.Errorf("Force-sleeper: Error applying project( %s )idled-at service annotations: %s", namespace, err)
+				}
+			} else {
+				err := s.SetDryRunResourceRuntimes(namespace)
+				if err != nil {
+					glog.Errorf("Error simulating force-sleep wakeup: %v", err)
 				}
 			}
-
 			projectCopy, err := kapi.Scheme.DeepCopy(project)
 			if err != nil {
 				glog.Errorf("Force-sleeper: Couldn't copy project from cache: %v", err)
@@ -233,11 +257,6 @@ func (s *Sleeper) wakeProject(project *cache.ResourceObject) bool {
 			}
 			project = projectCopy.(*cache.ResourceObject)
 
-			glog.V(2).Infof("Force-sleeper: Adding project( %s )Idled-At annotations.\n", namespace)
-			err = idling.AddProjectIdledAtAnnotation(s.resources, namespace, nowTime)
-			if err != nil {
-				glog.Errorf("Force-sleeper: Error applying project( %s )idled-at service annotations: %s", namespace, err)
-			}
 			project.LastSleepTime = time.Time{}
 			project.IsAsleep = false
 			s.resources.Indexer.UpdateResourceObject(project)
@@ -263,6 +282,39 @@ func (s *Sleeper) memoryQuota(pod *cache.ResourceObject) resource.Quantity {
 		return s.config.NonTermQuota
 	}
 
+}
+
+// Modify all ResourceObjects' cached runtimes when removing force-sleep
+// when running with Dry Run mode enabled, to better simulate real run times
+// (since in Dry Run mode, no resources are actually scaled or deleted with force-sleep)
+func (s *Sleeper) SetDryRunResourceRuntimes(namespace string) error {
+	glog.V(2).Infof("(Force-sleep/dry run) Simulating resource runtimes for namespace %s", namespace)
+	resources, err := s.resources.Indexer.ByIndex("byNamespace", namespace)
+	if err != nil {
+		return err
+	}
+	for _, resource := range resources {
+		r := resource.(*cache.ResourceObject)
+		copy, err := kapi.Scheme.DeepCopy(r)
+		if err != nil {
+			return fmt.Errorf("Force-sleeper: Couldn't copy resource from cache: %v", err)
+		}
+		resource := copy.(*cache.ResourceObject)
+
+		// If a resource is currently running, remove all its previous runtimes (simulating
+		// applied force-sleep) and set its most recent start time to now (simulating wakeup)
+		// Otherwise, just delete all previous start times
+		newRunningTimes := make([]*cache.RunningTime, 0)
+		if resource.IsStarted() {
+			newRunningTime := &cache.RunningTime{
+				Start: time.Now(),
+			}
+			newRunningTimes = append(newRunningTimes, newRunningTime)
+		}
+		resource.RunningTimes = newRunningTimes
+		s.resources.Indexer.UpdateResourceObject(resource)
+	}
+	return nil
 }
 
 // Syncs a project and determines if force-sleep is needed
@@ -314,15 +366,17 @@ func (s *Sleeper) SyncProject(namespace string) {
 	//Check if quota doesn't exist and should
 	if !project.LastSleepTime.IsZero() {
 		if time.Since(project.LastSleepTime) < s.config.ProjectSleepPeriod {
-			sleepQuota := s.projectSleepQuota.(*kapi.ResourceQuota)
-			quotaInterface := s.resources.KubeClient.ResourceQuotas(namespace)
-			_, err := quotaInterface.Create(sleepQuota)
-			if err != nil && !kerrors.IsAlreadyExists(err) {
-				glog.Errorf("Force-sleeper: Error creating sleep quota on project %s: %s\n", namespace, err)
-				return
-			}
-			if kerrors.IsAlreadyExists(err) {
-				return
+			if !s.config.DryRun {
+				sleepQuota := s.projectSleepQuota.(*kapi.ResourceQuota)
+				quotaInterface := s.resources.KubeClient.ResourceQuotas(namespace)
+				_, err := quotaInterface.Create(sleepQuota)
+				if err != nil && !kerrors.IsAlreadyExists(err) {
+					glog.Errorf("Force-sleeper: Error creating sleep quota on project %s: %s\n", namespace, err)
+					return
+				}
+				if kerrors.IsAlreadyExists(err) {
+					return
+				}
 			}
 			err = s.applyProjectSleep(namespace, project.LastSleepTime, project.LastSleepTime.Add(s.config.ProjectSleepPeriod))
 			if err != nil {

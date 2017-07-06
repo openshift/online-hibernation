@@ -24,7 +24,7 @@ import (
 
 const (
 	SATokenFile = "/var/run/secrets/kubernetes.io/serviceaccount/token"
-	HawkularCA = "/var/run/hawkular/ca.crt"
+	HawkularCA  = "/var/run/hawkular/ca.crt"
 )
 
 func main() {
@@ -32,26 +32,33 @@ func main() {
 	var quota, period, sleepSyncPeriod, idleSyncPeriod, idleQueryPeriod, projectSleepPeriod time.Duration
 	var workers, threshold int
 	var cfgFile, excludeNamespaces, termQuota, nontermQuota, hawkularURL, metricsBindAddr string
-	var hawkularInsecure, idleDryRun, inCluster, collectRuntime, collectCache bool
+	var hawkularInsecure, idleDryRun, sleepDryRun, inCluster, collectRuntime, collectCache bool
+
 	flag.DurationVar(&quota, "quota", 16*time.Hour, "Maximum quota-hours allowed in period before force sleep")
 	flag.DurationVar(&period, "period", 24*time.Hour, "Length of period in hours for quota consumption")
 	flag.DurationVar(&sleepSyncPeriod, "sleep-sync-period", 60*time.Minute, "Interval to sync project status")
 	flag.DurationVar(&projectSleepPeriod, "z", 8*time.Hour, "Length of time to apply force-sleep to projects over quota.")
+	flag.BoolVar(&sleepDryRun, "sleep-dry-run", true, "Log which projects will be put into force-sleep but do not restrict them.")
+
 	flag.IntVar(&workers, "w", 10, "Number of workers to process project sync")
-    flag.StringVar(&cfgFile, "config", "", "load configuration from file")
+	flag.StringVar(&cfgFile, "config", "", "load configuration from file")
 	flag.StringVar(&excludeNamespaces, "exclude-namespace", "openshift-infra,default,openshift", "Comma-separated list of namespace to exclude in quota enforcement")
+
 	flag.StringVar(&termQuota, "terminating", "", "Memory quota for terminating pods")
 	flag.StringVar(&nontermQuota, "nonterminating", "", "Memory quota for non-terminating pods")
+
 	flag.StringVar(&metricsBindAddr, "metricsBindAddr", ":8080", "The address on localhost serving metrics - http://localhost:port/metrics")
 	flag.BoolVar(&collectRuntime, "collectRuntime", true, "Enable runtime metrics")
 	flag.BoolVar(&collectCache, "collectCache", true, "Enable cache metrics")
 	flag.StringVar(&hawkularURL, "hawkular-url", "https://hawkular-metrics.openshift-infra.svc.cluster.local", "Hawkular url")
 	flag.BoolVar(&hawkularInsecure, "insecure", true, "Use tls insecure-skip-verify to access Hawkular.")
+
 	flag.DurationVar(&idleSyncPeriod, "idle-sync-period", 10*time.Minute, "Interval to sync project idle status")
 	flag.DurationVar(&idleQueryPeriod, "idle-query-period", 30*time.Minute, "Period to compare network activity")
 	flag.IntVar(&threshold, "idle-threshold", 5000, "Minimun network traffic received (bytes) to avoid auto-idling")
-	flag.BoolVar(&inCluster, "in-cluster", true, "If incluster, CA and token will be gathered from within pod.")
 	flag.BoolVar(&idleDryRun, "idle-dry-run", true, "Log which projects will be auto-idled but do not idle them.")
+
+	flag.BoolVar(&inCluster, "in-cluster", true, "If incluster, CA and token will be gathered from within pod.")
 	flag.Parse()
 
 	tQuota, err := resource.ParseQuantity(termQuota)
@@ -106,6 +113,7 @@ func main() {
 		ProjectSleepPeriod: projectSleepPeriod,
 		TermQuota:          tQuota,
 		NonTermQuota:       ntQuota,
+		DryRun:             idleDryRun,
 	}
 
 	sleeper := forcesleep.NewSleeper(sleeperConfig, factory, cache)

@@ -67,6 +67,10 @@ parameters:
   description: Boolean for idler dry-run mode, where projects will be logged but not idled.
   value: "true"
 
+- name: SLEEP_DRYRUN
+  description: Boolean for sleeper dry-run mode, where projects will be logged but not modified.
+  value: "true"
+
 - name: IMAGE_PULL_POLICY
   description: The image pull policy (configurable to facilitate testing)
   value: IfNotPresent
@@ -212,6 +216,8 @@ objects:
             value: ${IN_CLUSTER}
           - name: IDLE_DRYRUN
             value: ${IDLE_DRYRUN}
+          - name: SLEEP_DRYRUN
+            value: ${SLEEP_DRYRUN}
           - name: LOG_LEVEL
             value: ${LOG_LEVEL}
           - name: METRICS_COLLECT_RUNTIME
@@ -234,6 +240,7 @@ objects:
           - -insecure=$(HAWKULAR_INSECURE)
           - -in-cluster=$(IN_CLUSTER)
           - -idle-dry-run=$(IDLE_DRYRUN)
+          - -sleep-dry-run=$(SLEEP_DRYRUN)
           - -idle-threshold=${IDLE_THRESHOLD}
           - -v=$(LOG_LEVEL)
           - -logtostderr
