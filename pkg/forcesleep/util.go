@@ -1,7 +1,7 @@
 package forcesleep
 
 import (
-	"github.com/openshift/online/force-sleep/pkg/cache"
+	"github.com/openshift/online-hibernation/pkg/cache"
 
 	"github.com/openshift/origin/pkg/cmd/util/clientcmd"
 

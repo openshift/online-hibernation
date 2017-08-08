@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/openshift/online/force-sleep/pkg/cache"
+	"github.com/openshift/online-hibernation/pkg/cache"
 
 	deployapi "github.com/openshift/origin/pkg/deploy/api"
 	unidlingapi "github.com/openshift/origin/pkg/unidling/api"
