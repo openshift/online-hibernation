@@ -50,7 +50,7 @@ type Cache struct {
 
 func NewCache(osClient osclient.Interface, kubeClient kclient.Interface, f *clientcmd.Factory, exclude map[string]bool) *Cache {
 	return &Cache{
-		Indexer:    NewResourceStore(exclude),
+		Indexer:    NewResourceStore(exclude, osClient, kubeClient),
 		OsClient:   osClient,
 		KubeClient: kubeClient,
 		Factory:    f,

@@ -113,7 +113,7 @@ func main() {
 		ProjectSleepPeriod: projectSleepPeriod,
 		TermQuota:          tQuota,
 		NonTermQuota:       ntQuota,
-		DryRun:             idleDryRun,
+		DryRun:             sleepDryRun,
 	}
 
 	sleeper := forcesleep.NewSleeper(sleeperConfig, factory, cache)

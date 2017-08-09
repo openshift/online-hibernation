@@ -7,12 +7,18 @@ import (
 
 	"github.com/golang/glog"
 
+	osclient "github.com/openshift/origin/pkg/client"
+
 	kapi "k8s.io/kubernetes/pkg/api"
+	kerrors "k8s.io/kubernetes/pkg/api/errors"
 	"k8s.io/kubernetes/pkg/api/meta"
 	"k8s.io/kubernetes/pkg/api/resource"
 	kcache "k8s.io/kubernetes/pkg/client/cache"
+	kclient "k8s.io/kubernetes/pkg/client/unversioned"
 	"k8s.io/kubernetes/pkg/types"
 )
+
+const LastSleepTimeAnnotation = "openshift.io/last-sleep-time"
 
 type ResourceObject struct {
 	Mutex             sync.RWMutex
@@ -37,19 +43,21 @@ type ResourceObject struct {
 type resourceStore struct {
 	mu sync.RWMutex
 	kcache.Indexer
-	Exclude map[string]bool
+	Exclude    map[string]bool
+	OsClient   osclient.Interface
+	KubeClient kclient.Interface
 }
 
-func NewResourceFromInterface(resource interface{}) *ResourceObject {
+func (s *resourceStore) NewResourceFromInterface(resource interface{}) *ResourceObject {
 	switch r := resource.(type) {
 	case *kapi.Pod:
-		return NewResourceFromPod(r)
+		return s.NewResourceFromPod(r)
 	case *kapi.ReplicationController:
-		return NewResourceFromRC(r)
+		return s.NewResourceFromRC(r)
 	case *kapi.Service:
-		return NewResourceFromService(r)
+		return s.NewResourceFromService(r)
 	case *kapi.Namespace:
-		return NewResourceFromProject(r.Name)
+		return s.NewResourceFromProject(r)
 	}
 	return nil
 }
@@ -57,7 +65,7 @@ func NewResourceFromInterface(resource interface{}) *ResourceObject {
 func (s *resourceStore) AddOrModify(obj interface{}) error {
 	switch r := obj.(type) {
 	case *kapi.Pod:
-		resObj := NewResourceFromInterface(obj.(*kapi.Pod))
+		resObj := s.NewResourceFromInterface(obj.(*kapi.Pod))
 		glog.V(3).Infof("Received ADD/MODIFY for pod: %s\n", resObj.Name)
 		// If the pod is running, make sure it's started in cache
 		// Otherwise, make sure it's stopped
@@ -68,7 +76,7 @@ func (s *resourceStore) AddOrModify(obj interface{}) error {
 			s.stopResource(resObj)
 		}
 	case *kapi.ReplicationController:
-		resObj := NewResourceFromInterface(obj.(*kapi.ReplicationController))
+		resObj := s.NewResourceFromInterface(obj.(*kapi.ReplicationController))
 		glog.V(3).Infof("Received ADD/MODIFY for RC: %s\n", resObj.Name)
 		// If RC has more than 0 active replicas, make sure it's started in cache
 		if r.Status.Replicas > 0 {
@@ -77,7 +85,7 @@ func (s *resourceStore) AddOrModify(obj interface{}) error {
 			s.stopResource(resObj)
 		}
 	case *kapi.Service:
-		resObj := NewResourceFromInterface(obj.(*kapi.Service))
+		resObj := s.NewResourceFromInterface(obj.(*kapi.Service))
 		glog.V(3).Infof("Received ADD/MODIFY for Service: %s\n", resObj.Name)
 		UID := string(resObj.UID)
 		obj, exists, err := s.GetResourceByKey(UID)
@@ -96,7 +104,7 @@ func (s *resourceStore) AddOrModify(obj interface{}) error {
 			s.Indexer.Add(resObj)
 		}
 	case *kapi.Namespace:
-		resObj := NewResourceFromInterface(obj.(*kapi.Namespace))
+		resObj := s.NewResourceFromInterface(obj.(*kapi.Namespace))
 		glog.V(3).Infof("Received ADD/MODIFY for Project: %s\n", r.Name)
 		if r.Status.Phase == kapi.NamespaceActive {
 			_, exists, err := s.GetResourceByKey(r.Name)
@@ -105,7 +113,7 @@ func (s *resourceStore) AddOrModify(obj interface{}) error {
 			}
 			if !exists {
 				if !s.Exclude[r.Name] {
-					resObj := NewResourceFromProject(r.Name)
+					resObj := s.NewResourceFromProject(r)
 					s.Indexer.Add(resObj)
 				}
 			}
@@ -125,11 +133,11 @@ func (s *resourceStore) AddOrModify(obj interface{}) error {
 			return s.Indexer.Update(resource)
 		} else {
 			if r.Status.Phase == kapi.NamespaceActive && !s.Exclude[r.Name] {
-				panic("Project not in cache")
+				glog.Errorf("Project not in cache")
 			}
 		}
 	default:
-		panic("Object not recognized")
+		glog.Errorf("Object not recognized")
 	}
 	return nil
 }
@@ -138,13 +146,13 @@ func (s *resourceStore) DeleteKapiResource(obj interface{}) error {
 	glog.V(3).Infof("Received DELETE event\n")
 	switch r := obj.(type) {
 	case *kapi.Pod, *kapi.Service, *kapi.ReplicationController:
-		resObj := NewResourceFromInterface(r)
+		resObj := s.NewResourceFromInterface(r)
 		UID := string(resObj.UID)
 		if s.ResourceInCache(UID) {
 			s.stopResource(resObj)
 		}
 	case *kapi.Namespace:
-		resObj := NewResourceFromInterface(r)
+		resObj := s.NewResourceFromInterface(r)
 		// Get all resources from a deleted namespace and remove them from the cache
 		resources, err := s.Indexer.ByIndex("byNamespace", resObj.Name)
 		if err != nil {
@@ -171,7 +179,7 @@ func (s *resourceStore) Add(obj interface{}) error {
 			return fmt.Errorf("Error: %s", err)
 		}
 	default:
-		panic("Object not recognized")
+		glog.Errorf("Object not recognized")
 	}
 	return nil
 }
@@ -185,7 +193,7 @@ func (s *resourceStore) Delete(obj interface{}) error {
 			return fmt.Errorf("Error: %s", err)
 		}
 	default:
-		panic("Object not recognized")
+		glog.Errorf("Object not recognized")
 	}
 	return nil
 }
@@ -199,7 +207,7 @@ func (s *resourceStore) Update(obj interface{}) error {
 			return fmt.Errorf("Error: %s", err)
 		}
 	default:
-		panic("Object not recognized")
+		glog.Errorf("Object not recognized")
 	}
 	return nil
 }
@@ -238,7 +246,7 @@ func (s *resourceStore) DeleteResourceObject(obj *ResourceObject) error {
 			}
 		}
 	default:
-		panic("Object not recognized")
+		glog.Errorf("Object not recognized")
 	}
 	return nil
 }
@@ -308,7 +316,7 @@ func (s *resourceStore) Replace(objs []interface{}, resVer string) error {
 				return err
 			}
 		default:
-			panic("Object was not recognized")
+			glog.Errorf("Object was not recognized")
 		}
 	}
 
@@ -377,7 +385,7 @@ func resourceKey(obj interface{}) (string, error) {
 }
 
 // NewResourceStore creates an Indexer store with the given key function
-func NewResourceStore(exclude map[string]bool) *resourceStore {
+func NewResourceStore(exclude map[string]bool, osClient osclient.Interface, kubeClient kclient.Interface) *resourceStore {
 	store := &resourceStore{
 		Indexer: kcache.NewIndexer(resourceKey, kcache.Indexers{
 			"byNamespace":        indexResourceByNamespace,
@@ -387,7 +395,9 @@ func NewResourceStore(exclude map[string]bool) *resourceStore {
 			"rcByDC":             getRCByDC,
 			"dcByRC":             getDCByRC,
 		}),
-		Exclude: exclude,
+		Exclude:    exclude,
+		OsClient:   osClient,
+		KubeClient: kubeClient,
 	}
 	store.mu.Lock()
 	defer store.mu.Unlock()
@@ -555,7 +565,7 @@ func (s *resourceStore) GetResourceByKey(UID string) (*ResourceObject, bool, err
 	return nil, false, nil
 }
 
-func NewResourceFromPod(pod *kapi.Pod) *ResourceObject {
+func (s *resourceStore) NewResourceFromPod(pod *kapi.Pod) *ResourceObject {
 	terminating := false
 	if (pod.Spec.RestartPolicy != kapi.RestartPolicyAlways) && (pod.Spec.ActiveDeadlineSeconds != nil) {
 		terminating = true
@@ -589,7 +599,7 @@ func NewResourceFromPod(pod *kapi.Pod) *ResourceObject {
 	return resource
 }
 
-func NewResourceFromRC(rc *kapi.ReplicationController) *ResourceObject {
+func (s *resourceStore) NewResourceFromRC(rc *kapi.ReplicationController) *ResourceObject {
 	resource := &ResourceObject{
 		UID:              rc.ObjectMeta.UID,
 		Name:             rc.ObjectMeta.Name,
@@ -618,7 +628,7 @@ func NewResourceFromRC(rc *kapi.ReplicationController) *ResourceObject {
 	return resource
 }
 
-func NewResourceFromService(svc *kapi.Service) *ResourceObject {
+func (s *resourceStore) NewResourceFromService(svc *kapi.Service) *ResourceObject {
 	resource := &ResourceObject{
 		UID:             svc.ObjectMeta.UID,
 		Name:            svc.ObjectMeta.Name,
@@ -635,14 +645,67 @@ func NewResourceFromService(svc *kapi.Service) *ResourceObject {
 	return resource
 }
 
-func NewResourceFromProject(namespace string) *ResourceObject {
-	return &ResourceObject{
-		UID:              types.UID(namespace),
-		Name:             namespace,
-		Namespace:        namespace,
+func (s *resourceStore) NewResourceFromProject(namespace *kapi.Namespace) *ResourceObject {
+	resource := &ResourceObject{
+		UID:              types.UID(namespace.Name),
+		Name:             namespace.Name,
+		Namespace:        namespace.Name,
 		Kind:             ProjectKind,
 		LastSleepTime:    time.Time{},
 		ProjectSortIndex: 0.0,
 		IsAsleep:         false,
 	}
+
+	// Parse any LastSleepTime annotation on the namespace
+	if namespace.ObjectMeta.Annotations != nil {
+		if namespace.ObjectMeta.Annotations[LastSleepTimeAnnotation] != "" {
+			glog.V(2).Infof("Caching previously-set LastSleepTime for project %s: %+v", namespace.Name, namespace.ObjectMeta.Annotations[LastSleepTimeAnnotation])
+			parsedTime, err := time.Parse("2006-01-02 15:04:05.999999999 -0700 MST", namespace.ObjectMeta.Annotations[LastSleepTimeAnnotation])
+			if err != nil {
+				parsedTime = s.getParsedTimeFromQuotaCreation(namespace)
+				glog.Errorf("Error parsing project LastSleepTime annotation on namespace: %v", err)
+			}
+			resource.LastSleepTime = parsedTime
+			if !parsedTime.IsZero() {
+				resource.IsAsleep = true
+			}
+		}
+	}
+	return resource
+}
+
+func (s *resourceStore) getParsedTimeFromQuotaCreation(namespace *kapi.Namespace) time.Time {
+	// Try to see if a quota exists and if so, get sleeptime from there
+	// If not, delete the annotation from the namespace object
+	quotaInterface := s.KubeClient.ResourceQuotas(namespace.Name)
+	quota, err := quotaInterface.Get(ProjectSleepQuotaName)
+	exists := true
+	if err != nil {
+		if kerrors.IsNotFound(err) {
+			exists = false
+		} else {
+			glog.Errorf("Error getting project resource quota: %v", err)
+			return time.Time{}
+		}
+	}
+
+	if exists {
+		parsedTime, err := time.Parse("2006-01-02 15:04:05.999999999 -0700 MST", quota.ObjectMeta.CreationTimestamp.String())
+		if err != nil {
+			glog.Errorf("Error parsing quota creationtimestamp: %v", err)
+		}
+		return parsedTime
+	} else {
+		copy, err := kapi.Scheme.DeepCopy(namespace)
+		if err != nil {
+			glog.Errorf("Error copying project: %v", err)
+		}
+		newNamespace := copy.(*kapi.Namespace)
+		delete(newNamespace.Annotations, LastSleepTimeAnnotation)
+		_, err = s.KubeClient.Namespaces().Update(newNamespace)
+		if err != nil {
+			glog.Errorf("Error deleting project LastSleepTime: %v", err)
+		}
+	}
+	return time.Time{}
 }
