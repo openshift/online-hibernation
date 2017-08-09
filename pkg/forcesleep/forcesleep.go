@@ -7,8 +7,8 @@ import (
 	"sort"
 	"time"
 
-	"github.com/openshift/online/force-sleep/pkg/cache"
-	"github.com/openshift/online/force-sleep/pkg/idling"
+	"github.com/openshift/online-hibernation/pkg/cache"
+	"github.com/openshift/online-hibernation/pkg/idling"
 
 	"github.com/openshift/origin/pkg/cmd/util/clientcmd"
 

@@ -47,8 +47,8 @@ done < glide.yaml
 
 cp -R vendor/* $TMPDIR
 
-# Remove any nested vendor directories that may have appeared.
-find $TMPDIR -mindepth 1 -type d -name vendor -exec rm -rf {} \; || :
+# Remove any nested origin vendor directories that may have appeared.
+find $TMPDIR/github.com/openshift/origin -mindepth 1 -type d -name vendor -exec rm -rf {} \; || :
 
 # Delete the component vendor directory to make way for the merged version.
 rm -rf vendor

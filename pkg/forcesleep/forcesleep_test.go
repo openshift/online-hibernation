@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/openshift/online/force-sleep/pkg/cache"
+	"github.com/openshift/online-hibernation/pkg/cache"
 
 	"github.com/openshift/origin/pkg/client/testclient"
 	"github.com/openshift/origin/pkg/cmd/util/clientcmd"
@@ -765,4 +765,3 @@ func runningTime(start, end time.Time) *cache.RunningTime {
 		End:   end,
 	}
 }
-

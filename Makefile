@@ -2,7 +2,7 @@
 
 .DEFAULT_GOAL := help
 
-TAG ?= openshift/force-sleep
+TAG ?= openshift/online-hibernation
 TARGET ?= prod
 
 DOCKERFILE := Dockerfile
@@ -10,10 +10,10 @@ ifeq ($(TARGET),dev)
 DOCKERFILE := Dockerfile.local
 endif
 
-# Builds and installs the force-sleep binary.
+# Builds and installs the hibernation binary.
 build: check-gopath
 	go install \
-		github.com/openshift/online/force-sleep/cmd/force-sleep
+		github.com/openshift/online-hibernation/cmd/force-sleep
 .PHONY: build
 
 
@@ -26,7 +26,7 @@ build: check-gopath
 #   make test-integration TESTFLAGS="-run TestSomething"
 test-integration: build
 	go test -v $(TESTFLAGS) \
-		github.com/openshift/online/force-sleep/pkg/...
+		github.com/openshift/online-hibernation/pkg/...
 .PHONY: test-integration
 
 
@@ -34,10 +34,10 @@ test-integration: build
 #
 # Args:
 #   TAG: Docker image tag to apply to the built image. If not specified, the
-#     default tag "openshift/force-sleep" will be used.
+#     default tag "openshift/online-hibernation" will be used.
 #
 # Example:
-#   make release TAG="my/force-sleep"
+#   make release TAG="my/online-hibernation"
 release:
 	docker build --rm -f $(DOCKERFILE) -t $(TAG) .
 .PHONY: release
@@ -51,7 +51,7 @@ release:
 # Examples:
 #
 #   make test-release
-#   make test-release TAG="my/force-sleep"
+#   make test-release TAG="my/online-hibernation"
 test-release:
 	docker run --rm -ti \
 		$(DOCKERFLAGS) \
@@ -65,15 +65,15 @@ test-release:
 verify:
 	$(GOPATH)/src/github.com/openshift/online/hack/verify-source.sh
 	go vet \
-		github.com/openshift/online/force-sleep/cmd/... \
-		github.com/openshift/online/force-sleep/pkg/...
+		github.com/openshift/online-hibernation/cmd/... \
+		github.com/openshift/online-hibernation/pkg/...
 .PHONY: verify
 
 
 # Prints a list of useful targets.
 help:
 	@echo ""
-	@echo "OpenShift Online Force-Sleep Controller"
+	@echo "OpenShift Online Hibernation Controller"
 	@echo ""
 	@echo "make build                compile binaries"
 	@echo "make test-integration     run integration tests"

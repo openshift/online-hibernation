@@ -1,4 +1,4 @@
-# Free Tier Force Sleep controller 
+# OpenShift Online Hibernation Controller
 
 #FROM rhel7.2:7.2-released
 FROM golang:1.7
@@ -11,7 +11,7 @@ ENV PATH=/go/bin:$PATH \
       #version="v3.3.0.0" \
       #architecture="x86_64"
 
-ADD . /go/src/github.com/openshift/online/force-sleep
+ADD . /go/src/github.com/openshift/online-hibernation
 
 #RUN yum-config-manager --enable rhel-7-server-optional-rpms && \
     #INSTALL_PKGS="golang make" && \
@@ -19,7 +19,7 @@ ADD . /go/src/github.com/openshift/online/force-sleep
     #rpm -V $INSTALL_PKGS && \
     #yum clean all -y
 
-WORKDIR /go/src/github.com/openshift/online/force-sleep
+WORKDIR /go/src/github.com/openshift/online-hibernation
 RUN make build TARGET=prod
 ENTRYPOINT ["force-sleep"]
 

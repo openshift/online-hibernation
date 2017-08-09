@@ -9,9 +9,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/openshift/online/force-sleep/pkg/cache"
-	"github.com/openshift/online/force-sleep/pkg/forcesleep"
-	"github.com/openshift/online/force-sleep/pkg/idling"
+	"github.com/openshift/online-hibernation/pkg/cache"
+	"github.com/openshift/online-hibernation/pkg/forcesleep"
+	"github.com/openshift/online-hibernation/pkg/idling"
 	_ "github.com/openshift/origin/pkg/api/install"
 	osclient "github.com/openshift/origin/pkg/client"
 	"github.com/openshift/origin/pkg/cmd/util/clientcmd"

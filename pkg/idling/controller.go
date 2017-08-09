@@ -7,7 +7,7 @@ import (
 
 	"github.com/golang/glog"
 	"github.com/hawkular/hawkular-client-go/metrics"
-	"github.com/openshift/online/force-sleep/pkg/cache"
+	"github.com/openshift/online-hibernation/pkg/cache"
 	"github.com/openshift/origin/pkg/cmd/util/clientcmd"
 
 	buildapi "github.com/openshift/origin/pkg/build/api"
