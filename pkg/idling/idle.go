@@ -133,11 +133,10 @@ func ScaleProjectRCs(c *cache.Cache, namespace string) error {
 	}
 
 	for _, thisRC := range rcList.Items {
-		rcWDC, err := c.Indexer.ByIndex("dcByRC", thisRC.Name)
-		if err != nil {
-			return err
-		}
-		if len(rcWDC) != 0 {
+		// TODO: Use indexer function 'rcByDC' here for efficiency?
+		// Given thisRC name, check to see if thisRC has a DC
+		// If thisRC does not have an associated DC, then scale the RC,
+		if _, exists := thisRC.Spec.Selector["deploymentconfig"]; !exists {
 			copy, err := kapi.Scheme.DeepCopy(thisRC)
 			if err != nil {
 				return err
@@ -153,6 +152,9 @@ func ScaleProjectRCs(c *cache.Cache, namespace string) error {
 					failed = true
 				}
 			}
+		} else {
+			dc := thisRC.Spec.Selector["deploymentconfig"]
+			glog.V(3).Infof("Skipping RC( %s ), already scaled associated DC( %s )", thisRC.Name, dc)
 		}
 	}
 	if failed {

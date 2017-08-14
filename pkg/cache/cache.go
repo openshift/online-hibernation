@@ -267,14 +267,6 @@ func indexResourceByNamespaceAndKind(obj interface{}) ([]string, error) {
 	return []string{fullName}, nil
 }
 
-func getDCByRC(obj interface{}) ([]string, error) {
-	object := obj.(*ResourceObject)
-	if object.Kind == OpenShiftDCName {
-		return []string{object.DeploymentConfig}, nil
-	}
-	return []string{}, nil
-}
-
 func (c *Cache) SetUpIndexer() {
 
 	podLW := &kcache.ListWatch{
