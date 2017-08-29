@@ -393,7 +393,6 @@ func NewResourceStore(exclude map[string]bool, osClient osclient.Interface, kube
 			"getProject":         getProjectResource,
 			"ofKind":             getAllResourcesOfKind,
 			"rcByDC":             getRCByDC,
-			"dcByRC":             getDCByRC,
 		}),
 		Exclude:    exclude,
 		OsClient:   osClient,
