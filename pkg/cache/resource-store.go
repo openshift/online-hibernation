@@ -145,11 +145,17 @@ func (s *resourceStore) AddOrModify(obj interface{}) error {
 func (s *resourceStore) DeleteKapiResource(obj interface{}) error {
 	glog.V(3).Infof("Received DELETE event\n")
 	switch r := obj.(type) {
-	case *kapi.Pod, *kapi.Service, *kapi.ReplicationController:
+	case *kapi.Pod, *kapi.ReplicationController:
 		resObj := s.NewResourceFromInterface(r)
 		UID := string(resObj.UID)
 		if s.ResourceInCache(UID) {
 			s.stopResource(resObj)
+		}
+	case *kapi.Service:
+		resObj := s.NewResourceFromInterface(r)
+		UID := string(resObj.UID)
+		if s.ResourceInCache(UID) {
+			s.Indexer.Delete(resObj)
 		}
 	case *kapi.Namespace:
 		resObj := s.NewResourceFromInterface(r)
