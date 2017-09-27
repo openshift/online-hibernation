@@ -12,6 +12,7 @@ import (
 	"github.com/golang/glog"
 
 	kapi "k8s.io/kubernetes/pkg/api"
+	kerrors "k8s.io/kubernetes/pkg/api/errors"
 	"k8s.io/kubernetes/pkg/api/meta"
 	"k8s.io/kubernetes/pkg/api/unversioned"
 	kcache "k8s.io/kubernetes/pkg/client/cache"
@@ -220,11 +221,13 @@ func (c *Cache) GetAndCopyEndpoint(namespace, name string) (*kapi.Endpoints, err
 	endpointInterface := c.KubeClient.Endpoints(namespace)
 	endpoint, err := endpointInterface.Get(name)
 	if err != nil {
-		return nil, errors.New(fmt.Sprintf("Error annotating endpoint in namespace %s: %s\n", namespace, err))
+		if !kerrors.IsNotFound(err) {
+			return nil, errors.New(fmt.Sprintf("Error getting endpoint in namespace( %s ): %s", namespace, err))
+		}
 	}
 	copy, err := kapi.Scheme.DeepCopy(endpoint)
 	if err != nil {
-		return nil, errors.New(fmt.Sprintf("Error annotating endpoint in namespace %s: %s\n", namespace, err))
+		return nil, errors.New(fmt.Sprintf("Error copying endpoint in namespace( %s ): %s", namespace, err))
 	}
 	newEndpoint := copy.(*kapi.Endpoints)
 

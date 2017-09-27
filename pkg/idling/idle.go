@@ -17,77 +17,17 @@ import (
 	kerrors "k8s.io/kubernetes/pkg/api/errors"
 )
 
-// These are just to provide the "FullIdleAnnotations" constant to be used as a parameter when idling
 // The unidlingapi constants are copied over for consistency
 const (
 	IdledAtAnnotation       = unidlingapi.IdledAtAnnotation
 	PreviousScaleAnnotation = unidlingapi.PreviousScaleAnnotation
 	UnidleTargetAnnotation  = unidlingapi.UnidleTargetAnnotation
-	FullIdleAnnotations     = "full"
 )
 
 type ControllerScaleReference struct {
 	Kind     string
 	Name     string
 	Replicas int32
-}
-
-// The goal with this is to re-create `oc idle` to the extent we need to, in order to provide automatic re-scaling on project wake
-// `oc idle` links controllers to endpoints by:
-//   1. taking in an endpoint (service name)
-//   2. getting the pods on that endpoint
-//   3. getting the controller on each pod (and, in the case of DCs, getting the controller on that controller)
-// This approach is:
-//   1. loop through all services in project
-//   2. for each service, get pods on service by label selector
-//   3. get the controller on each pod (and, in the case of DCs, get the controller on that controller)
-//   4. get endpoint with the same name as the service
-func IdleProjectServices(c *cache.Cache, namespace string) error {
-	failed := false
-	services, err := c.GetProjectServices(namespace)
-	if err != nil {
-		return err
-	}
-	nowTime := time.Now()
-	// Loop through all of the services in a namespace
-	for _, obj := range services {
-		svc := obj.(*cache.ResourceObject)
-		err = AnnotateService(c, svc, nowTime, namespace, FullIdleAnnotations)
-		if err != nil {
-			glog.Errorf("Error idling service: %s", err)
-			failed = true
-		}
-		glog.V(0).Infof("Added service idled-at annotation( %s )", svc.Name)
-	}
-
-	if failed {
-		return errors.New("Failed to idle all project services")
-	}
-	// TODO: What do we do with pods that have no service? If we scale them, they will remain
-	// scaled down until a user manually scales them up again.. for now, only scale pods with
-	// services...
-	if len(services) != 0 {
-		glog.V(2).Infof("Scaling DCs in project %s\n", namespace)
-		err = ScaleProjectDCs(c, namespace)
-		if err != nil {
-			failed = true
-			glog.Errorf("Error scaling DCs in project %s: %s\n", namespace, err)
-		}
-
-		glog.V(2).Infof("Scaling RCs in project %s\n", namespace)
-		err = ScaleProjectRCs(c, namespace)
-		if err != nil {
-			failed = true
-			glog.Errorf("Error scaling RCs in project %s: %s\n", namespace, err)
-		}
-
-		if failed {
-			return fmt.Errorf("Error idling services in project %s\n", namespace)
-		}
-	} else {
-		glog.V(2).Infof("Did not idle resources in project( %s ), no services found", namespace)
-	}
-	return nil
 }
 
 func ScaleProjectDCs(c *cache.Cache, namespace string) error {
@@ -108,23 +48,19 @@ func ScaleProjectDCs(c *cache.Cache, namespace string) error {
 		newDC.Spec.Replicas = 0
 		_, err = dcInterface.Update(&newDC)
 		if err != nil {
-			if kerrors.IsNotFound(err) {
-				continue
-			} else {
-				glog.Errorf("Error scaling DC in namespace %s: %s\n", namespace, err)
+			if !kerrors.IsNotFound(err) {
+				glog.Errorf("Project( %s) DC( %s ): %s", namespace, dc.Name, err)
 				failed = true
 			}
 		}
-
 	}
 	if failed {
-		return errors.New("Failed to scale all project DCs")
+		return errors.New(fmt.Sprintf("Failed to scale all project( %s)DCs", namespace))
 	}
 	return nil
 }
 
 func ScaleProjectRCs(c *cache.Cache, namespace string) error {
-	failed := false
 	// Scale RCs to 0
 	rcInterface := c.KubeClient.ReplicationControllers(namespace)
 	rcList, err := rcInterface.List(kapi.ListOptions{})
@@ -132,6 +68,7 @@ func ScaleProjectRCs(c *cache.Cache, namespace string) error {
 		return err
 	}
 
+	failed := false
 	for _, thisRC := range rcList.Items {
 		// TODO: Use indexer function 'rcByDC' here for efficiency?
 		// Given thisRC name, check to see if thisRC has a DC
@@ -145,10 +82,8 @@ func ScaleProjectRCs(c *cache.Cache, namespace string) error {
 			newRC.Spec.Replicas = 0
 			_, err = rcInterface.Update(&newRC)
 			if err != nil {
-				if kerrors.IsNotFound(err) {
-					continue
-				} else {
-					glog.Errorf("Error scaling RC in namespace %s: %s\n", namespace, err)
+				if !kerrors.IsNotFound(err) {
+					glog.Errorf("Project( %s) RC( %s ): %s", namespace, thisRC.Name, err)
 					failed = true
 				}
 			}
@@ -158,7 +93,7 @@ func ScaleProjectRCs(c *cache.Cache, namespace string) error {
 		}
 	}
 	if failed {
-		return errors.New("Failed to scale all project RCs")
+		return errors.New(fmt.Sprintf("Failed to scale all project( %s )RCs", namespace))
 	}
 	return nil
 }
@@ -170,20 +105,19 @@ func DeleteProjectPods(c *cache.Cache, namespace string) error {
 	if err != nil {
 		return err
 	}
+
 	failed := false
 	for _, pod := range podList.Items {
 		err = podInterface.Delete(pod.ObjectMeta.Name, &kapi.DeleteOptions{})
 		if err != nil {
-			if kerrors.IsNotFound(err) {
-				continue
-			} else {
-				glog.Errorf("Error deleting pods in namespace %s: %s\n", namespace, err)
+			if !kerrors.IsNotFound(err) {
+				glog.Errorf("Project( %s ) Pod( %s ): %s", namespace, pod.Name, err)
 				failed = true
 			}
 		}
 	}
 	if failed {
-		return errors.New("Failed to delete all project pods")
+		return errors.New(fmt.Sprintf("Failed to delete all project( %s )pods", namespace))
 	}
 	return nil
 }
@@ -197,18 +131,18 @@ func AddProjectPreviousScaleAnnotation(c *cache.Cache, namespace string) error {
 	if err != nil {
 		return err
 	}
-
 	// Loop through all of the services in a namespace
 	for _, obj := range svcs {
 		svc := obj.(*cache.ResourceObject)
+		glog.V(2).Infof("Adding previous scale annotation to service( %s )", svc.Name)
 		err = AnnotateService(c, svc, time.Time{}, namespace, PreviousScaleAnnotation)
 		if err != nil {
-			glog.Errorf("Error idling service: %s", err)
+			glog.Errorf("Project( %s ) Service( %s ): %s", namespace, svc.Name, err)
 			failed = true
 		}
 	}
 	if failed {
-		return errors.New("Failed to idle all project services")
+		return errors.New(fmt.Sprintf("Failed to add previous scale annotation to all project( %s )services", namespace))
 	}
 	return nil
 }
@@ -216,7 +150,7 @@ func AddProjectPreviousScaleAnnotation(c *cache.Cache, namespace string) error {
 // Add idling IdledAtAnnotation to all services in a namespace
 // This should only be called after calling AddProjectPreviousScaleAnnotation(), as it depends on the
 // service's ScaleRefs annotation to determine which controllers belong to a service
-func AddProjectIdledAtAnnotation(c *cache.Cache, namespace string, nowTime time.Time) error {
+func AddProjectIdledAtAnnotation(c *cache.Cache, namespace string, nowTime time.Time, sleepPeriod time.Duration) error {
 	failed := false
 	svcs, err := c.GetProjectServices(namespace)
 	if err != nil {
@@ -228,102 +162,138 @@ func AddProjectIdledAtAnnotation(c *cache.Cache, namespace string, nowTime time.
 		svc := obj.(*cache.ResourceObject)
 		err = AnnotateService(c, svc, nowTime, namespace, IdledAtAnnotation)
 		if err != nil {
-			glog.Errorf("Error idling service: %s", err)
+			glog.Errorf("Project( %s ) Service( %s ): %s", namespace, svc.Name, err)
 			failed = true
 		}
 	}
 	if failed {
-		return errors.New("Failed to idle all project services")
+		return errors.New(fmt.Sprintf("Failed to add idled-at annotation to all project( %s )services", namespace))
 	}
 	return nil
 }
 
 // Adds the requested idling annotations to a service and all controllers in that service
 func AnnotateService(c *cache.Cache, svc *cache.ResourceObject, nowTime time.Time, namespace, annotation string) error {
-	endpointInterface := c.KubeClient.Endpoints(namespace)
-	newEndpoint, err := c.GetAndCopyEndpoint(namespace, svc.Name)
+	project, err := c.GetProject(namespace)
 	if err != nil {
-		return errors.New(fmt.Sprintf("Error annotating Endpoint in namespace %s: %s\n", namespace, err))
+		return err
 	}
-
-	if annotation == PreviousScaleAnnotation || annotation == FullIdleAnnotations {
-		projectPods, err := c.GetProjectPods(namespace)
+	// TODO: Limitation of oc idle and auto-idler: Cannot handle 2 services sharing a single RC.
+	// Projects with 2 services sharing an RC will have unpredictable behavior of idling/auto-idling
+	// This needs to be fixed in oc idle code.  Will document with auto-idling documentation for now.
+	if annotation == PreviousScaleAnnotation {
+		endpointInterface := c.KubeClient.Endpoints(namespace)
+		newEndpoint, err := c.GetAndCopyEndpoint(namespace, svc.Name)
 		if err != nil {
 			return err
 		}
-
-		// Find the pods for this service, then find the scalable resources for those pods
-		pods := c.GetPodsForService(svc, projectPods)
-		resourceRefs, err := c.FindScalableResourcesForService(pods)
+		epList, err := endpointInterface.List(kapi.ListOptions{})
 		if err != nil {
-			return errors.New(fmt.Sprintf("Error scaling service: %s\n", err))
+			return err
 		}
-
-		// Store the scalable resources in a map (this will become an annotation on the service later)
-		scaleRefs := make(map[kapi.ObjectReference]*ControllerScaleReference)
-		for ref := range resourceRefs {
-			scaleRef, err := AnnotateController(c, ref, nowTime, annotation)
-			if err != nil {
-				return errors.New(fmt.Sprintf("Error annotating controller: %s\n", err))
+		for _, ep := range epList.Items {
+			// Need to delete any previous IdledAtAnnotations to prevent premature unidling
+			if newEndpoint.Annotations[unidlingapi.IdledAtAnnotation] != "" {
+				if project.IsAsleep {
+					glog.V(2).Infof("Force-sleeper: Removing stale idled-at annotation in endpoint( %s ) project( %s )", ep.Name, namespace)
+				} else {
+					glog.V(2).Infof("Auto-idler: Removing stale idled-at annotation in endpoint( %s ) project( %s )", ep.Name, namespace)
+				}
+				delete(newEndpoint.Annotations, unidlingapi.IdledAtAnnotation)
 			}
-			scaleRefs[ref] = scaleRef
-		}
+			_, targetExists := ep.ObjectMeta.Annotations[unidlingapi.UnidleTargetAnnotation]
+			// TODO: It's possible that the unidle target that already exists has a replica that is
+			// not up-to-date.  For instance, a project was *manually* unidled, then scaled.  Then if
+			// the project is auto-idled, the unidle target annotation will hold the replicas of the
+			// original scale, before the project was manually scaled.
+			// For now, skip setting new unidle target when one already exists in an endpoint,
+			// at the risk of keeping an outdated scale, to prevent unidle-target being set to 0. It's
+			// not currently possible to predict if project is currently in the process of becoming idled.
+			// This needs to be fixed in oc idle/web-console code.
+			if targetExists {
+				if !project.IsAsleep {
+					glog.V(2).Infof("Auto-idler: Service( %s ), endpoint( %s )already has unidle target annotation, skipping previous scale annotation...", svc.Name, ep.Name)
+				} else {
+					glog.V(2).Infof("Force-sleeper: Service( %s ), endpoint( %s )already has unidle target annotation, skipping previous scale annotation...", svc.Name, ep.Name)
+				}
+			} else {
+				projectPods, err := c.GetProjectPods(namespace)
+				if err != nil {
+					return err
+				}
+				// Find the pods for this service, then find the scalable resources for those pods
+				pods := c.GetPodsForService(svc, projectPods)
+				resourceRefs, err := c.FindScalableResourcesForService(pods)
+				if err != nil {
+					return err
+				}
+				// Store the scalable resources in a map (this will become an annotation on the service later)
+				scaleRefs := make(map[kapi.ObjectReference]*ControllerScaleReference)
+				for ref := range resourceRefs {
+					scaleRef, err := AnnotateController(c, ref, nowTime, annotation, project.IsAsleep)
+					if err != nil {
+						return err
+					}
+					scaleRefs[ref] = scaleRef
+				}
 
-		var endpointScaleRefs []*ControllerScaleReference
-		for _, scaleRef := range scaleRefs {
-			endpointScaleRefs = append(endpointScaleRefs, scaleRef)
-		}
-		scaleRefsBytes, err := json.Marshal(endpointScaleRefs)
-		if err != nil {
-			return errors.New(fmt.Sprintf("Error annotating Endpoint in namespace %s: %s\n", namespace, err))
-		}
+				var endpointScaleRefs []*ControllerScaleReference
+				for _, scaleRef := range scaleRefs {
+					endpointScaleRefs = append(endpointScaleRefs, scaleRef)
+				}
+				scaleRefsBytes, err := json.Marshal(endpointScaleRefs)
+				if err != nil {
+					return err
+				}
 
-		// Add the scalable resources annotation to the service (endpoint)
-		newEndpoint.Annotations[unidlingapi.UnidleTargetAnnotation] = string(scaleRefsBytes)
-		// Need to delete any previous IdledAtAnnotations to prevent premature unidling
-		if newEndpoint.Annotations[unidlingapi.IdledAtAnnotation] != "" {
-			delete(newEndpoint.Annotations, unidlingapi.IdledAtAnnotation)
+				// Add the scalable resources annotation to the service (endpoint)
+				newEndpoint.Annotations[unidlingapi.UnidleTargetAnnotation] = string(scaleRefsBytes)
+				_, err = endpointInterface.Update(newEndpoint)
+				if err != nil {
+					return err
+				}
+				return nil
+			}
 		}
 	}
-
 	var scaleRefs []ControllerScaleReference
-	if annotation == IdledAtAnnotation || annotation == FullIdleAnnotations {
+	if annotation == IdledAtAnnotation {
+		endpointInterface := c.KubeClient.Endpoints(namespace)
+		newEndpoint, err := c.GetAndCopyEndpoint(namespace, svc.Name)
+		if err != nil {
+			return err
+		}
 		// Add the annotation to the endpoint (service) and use the endpoints ScaleRef annotation to find
 		// which controllers need to be annotated
 		newEndpoint.Annotations[unidlingapi.IdledAtAnnotation] = nowTime.Format(time.RFC3339)
 		scaleRefsBytes := newEndpoint.Annotations[unidlingapi.UnidleTargetAnnotation]
 		err = json.Unmarshal([]byte(scaleRefsBytes), &scaleRefs)
 		if err != nil {
-			return errors.New(fmt.Sprintf("Error annotating DC in namespace %s when unmarshalling scaleRefsBytes from endpoint: %s\n", namespace, err))
+			return err
 		}
-	}
+		_, err = endpointInterface.Update(newEndpoint)
+		if err != nil {
+			return err
+		}
 
-	if annotation == IdledAtAnnotation {
 		// Annotate the controllers
-		// We only need to do this if we're specifically requesting the IdledAtAnnotation,
-		// since FullIdleAnnotations would have already added IdledAt during the previous call to AnnotateController()
 		for _, scaleRef := range scaleRefs {
 			ref := kapi.ObjectReference{
 				Name:      scaleRef.Name,
 				Kind:      scaleRef.Kind,
 				Namespace: svc.Namespace,
 			}
-			_, err := AnnotateController(c, ref, nowTime, annotation)
+			_, err := AnnotateController(c, ref, nowTime, annotation, project.IsAsleep)
 			if err != nil {
-				return errors.New(fmt.Sprintf("Error annotating controller: %s\n", err))
+				return err
 			}
 		}
-	}
-
-	_, err = endpointInterface.Update(newEndpoint)
-	if err != nil {
-		return errors.New(fmt.Sprintf("Error marshalling endpoint scale reference while annotating Endpoint in namespace %s: %s\n", namespace, err))
 	}
 	return nil
 }
 
 // Add idling annotations to a controller based on the `annotation` parameter
-func AnnotateController(c *cache.Cache, ref kapi.ObjectReference, nowTime time.Time, annotation string) (*ControllerScaleReference, error) {
+func AnnotateController(c *cache.Cache, ref kapi.ObjectReference, nowTime time.Time, annotation string, isAsleep bool) (*ControllerScaleReference, error) {
 	obj, err := cache.GetController(ref, c.Factory)
 	if err != nil {
 		return nil, err
@@ -343,24 +313,25 @@ func AnnotateController(c *cache.Cache, ref kapi.ObjectReference, nowTime time.T
 			newDC.Annotations = make(map[string]string)
 		}
 		switch annotation {
-		case FullIdleAnnotations:
-			newDC.Annotations[unidlingapi.PreviousScaleAnnotation] = fmt.Sprintf("%v", controller.Spec.Replicas)
-			newDC.Annotations[unidlingapi.IdledAtAnnotation] = nowTime.Format(time.RFC3339)
 		case IdledAtAnnotation:
 			newDC.Annotations[unidlingapi.IdledAtAnnotation] = nowTime.Format(time.RFC3339)
 		case PreviousScaleAnnotation:
-			newDC.Annotations[unidlingapi.PreviousScaleAnnotation] = fmt.Sprintf("%v", controller.Spec.Replicas)
-			// Need to remove reference to a previous idling, if it exists
 			if newDC.Annotations[unidlingapi.IdledAtAnnotation] != "" {
+				if isAsleep {
+					glog.V(2).Infof("Force-sleeper: Removing stale idled-at annotation in DC( %s ) project( %s )", newDC.Name, controller.Namespace)
+				} else {
+					glog.V(2).Infof("Auto-idler: Removing stale idled-at annotation in DC( %s ) project( %s )", newDC.Name, controller.Namespace)
+				}
 				delete(newDC.Annotations, unidlingapi.IdledAtAnnotation)
 			}
+			newDC.Annotations[unidlingapi.PreviousScaleAnnotation] = fmt.Sprintf("%v", controller.Spec.Replicas)
 		}
 		_, err = dcInterface.Update(newDC)
 		if err != nil {
 			if kerrors.IsNotFound(err) {
 				return nil, nil
 			} else {
-				return nil, errors.New(fmt.Sprintf("Error annotating DC in namespace %s: %s\n", controller.Namespace, err))
+				return nil, err
 			}
 		}
 
@@ -376,17 +347,18 @@ func AnnotateController(c *cache.Cache, ref kapi.ObjectReference, nowTime time.T
 			newRC.Annotations = make(map[string]string)
 		}
 		switch annotation {
-		case FullIdleAnnotations:
-			newRC.Annotations[unidlingapi.PreviousScaleAnnotation] = fmt.Sprintf("%v", controller.Spec.Replicas)
-			newRC.Annotations[unidlingapi.IdledAtAnnotation] = nowTime.Format(time.RFC3339)
 		case IdledAtAnnotation:
 			newRC.Annotations[unidlingapi.IdledAtAnnotation] = nowTime.Format(time.RFC3339)
 		case PreviousScaleAnnotation:
-			newRC.Annotations[unidlingapi.PreviousScaleAnnotation] = fmt.Sprintf("%v", controller.Spec.Replicas)
-			// Need to remove reference to a previous idling, if it exists
 			if newRC.Annotations[unidlingapi.IdledAtAnnotation] != "" {
+				if isAsleep {
+					glog.V(2).Infof("Force-sleeper: Removing stale idled-at annotation in RC( %s ) project( %s )", newRC.Name, controller.Namespace)
+				} else {
+					glog.V(2).Infof("Auto-idler: Removing stale idled-at annotation in RC( %s ) project( %s )", newRC.Name, controller.Namespace)
+				}
 				delete(newRC.Annotations, unidlingapi.IdledAtAnnotation)
 			}
+			newRC.Annotations[unidlingapi.PreviousScaleAnnotation] = fmt.Sprintf("%v", controller.Spec.Replicas)
 		}
 
 		_, err = rcInterface.Update(newRC)
@@ -394,7 +366,7 @@ func AnnotateController(c *cache.Cache, ref kapi.ObjectReference, nowTime time.T
 			if kerrors.IsNotFound(err) {
 				return nil, nil
 			} else {
-				return nil, errors.New(fmt.Sprintf("Error annotating RC in namespace %s: %s\n", controller.Namespace, err))
+				return nil, err
 			}
 		}
 	}
