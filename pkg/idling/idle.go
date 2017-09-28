@@ -187,20 +187,49 @@ func AnnotateService(c *cache.Cache, svc *cache.ResourceObject, nowTime time.Tim
 		if err != nil {
 			return err
 		}
+		// Need to delete any previous IdledAtAnnotations to prevent premature unidling
+		if newEndpoint.Annotations[unidlingapi.IdledAtAnnotation] != "" {
+			if project.IsAsleep {
+				glog.V(2).Infof("Force-sleeper: Removing stale idled-at annotation in endpoint( %s ) project( %s )", svc.Name, namespace)
+			} else {
+				glog.V(2).Infof("Auto-idler: Removing stale idled-at annotation in endpoint( %s ) project( %s )", svc.Name, namespace)
+			}
+			delete(newEndpoint.Annotations, unidlingapi.IdledAtAnnotation)
+		}
+		projectPods, err := c.GetProjectPods(namespace)
+		if err != nil {
+			return err
+		}
+		// Find the pods for this service, then find the scalable resources for those pods
+		pods := c.GetPodsForService(svc, projectPods)
+		resourceRefs, err := c.FindScalableResourcesForService(pods)
+		if err != nil {
+			return err
+		}
+		// Store the scalable resources in a map (this will become an annotation on the service later)
+		scaleRefs := make(map[kapi.ObjectReference]*ControllerScaleReference)
+		for ref := range resourceRefs {
+			scaleRef, err := AnnotateController(c, ref, nowTime, annotation, project.IsAsleep)
+			if err != nil {
+				return err
+			}
+			scaleRefs[ref] = scaleRef
+		}
+
+		var endpointScaleRefs []*ControllerScaleReference
+		for _, scaleRef := range scaleRefs {
+			endpointScaleRefs = append(endpointScaleRefs, scaleRef)
+		}
+		scaleRefsBytes, err := json.Marshal(endpointScaleRefs)
+		if err != nil {
+			return err
+		}
+
 		epList, err := endpointInterface.List(kapi.ListOptions{})
 		if err != nil {
 			return err
 		}
 		for _, ep := range epList.Items {
-			// Need to delete any previous IdledAtAnnotations to prevent premature unidling
-			if newEndpoint.Annotations[unidlingapi.IdledAtAnnotation] != "" {
-				if project.IsAsleep {
-					glog.V(2).Infof("Force-sleeper: Removing stale idled-at annotation in endpoint( %s ) project( %s )", ep.Name, namespace)
-				} else {
-					glog.V(2).Infof("Auto-idler: Removing stale idled-at annotation in endpoint( %s ) project( %s )", ep.Name, namespace)
-				}
-				delete(newEndpoint.Annotations, unidlingapi.IdledAtAnnotation)
-			}
 			_, targetExists := ep.ObjectMeta.Annotations[unidlingapi.UnidleTargetAnnotation]
 			// TODO: It's possible that the unidle target that already exists has a replica that is
 			// not up-to-date.  For instance, a project was *manually* unidled, then scaled.  Then if
@@ -212,49 +241,21 @@ func AnnotateService(c *cache.Cache, svc *cache.ResourceObject, nowTime time.Tim
 			// This needs to be fixed in oc idle/web-console code.
 			if targetExists {
 				if !project.IsAsleep {
-					glog.V(2).Infof("Auto-idler: Service( %s ), endpoint( %s )already has unidle target annotation, skipping previous scale annotation...", svc.Name, ep.Name)
+					glog.V(2).Infof("Auto-idler: Endpoint( %s )has unidle target annotation, skipping previous scale annotation", ep.Name)
 				} else {
-					glog.V(2).Infof("Force-sleeper: Service( %s ), endpoint( %s )already has unidle target annotation, skipping previous scale annotation...", svc.Name, ep.Name)
+					glog.V(2).Infof("Force-sleeper: Endpoint( %s )has unidle target annotation, skipping previous scale annotation", ep.Name)
 				}
 			} else {
-				projectPods, err := c.GetProjectPods(namespace)
-				if err != nil {
-					return err
-				}
-				// Find the pods for this service, then find the scalable resources for those pods
-				pods := c.GetPodsForService(svc, projectPods)
-				resourceRefs, err := c.FindScalableResourcesForService(pods)
-				if err != nil {
-					return err
-				}
-				// Store the scalable resources in a map (this will become an annotation on the service later)
-				scaleRefs := make(map[kapi.ObjectReference]*ControllerScaleReference)
-				for ref := range resourceRefs {
-					scaleRef, err := AnnotateController(c, ref, nowTime, annotation, project.IsAsleep)
-					if err != nil {
-						return err
-					}
-					scaleRefs[ref] = scaleRef
-				}
-
-				var endpointScaleRefs []*ControllerScaleReference
-				for _, scaleRef := range scaleRefs {
-					endpointScaleRefs = append(endpointScaleRefs, scaleRef)
-				}
-				scaleRefsBytes, err := json.Marshal(endpointScaleRefs)
-				if err != nil {
-					return err
-				}
-
 				// Add the scalable resources annotation to the service (endpoint)
 				newEndpoint.Annotations[unidlingapi.UnidleTargetAnnotation] = string(scaleRefsBytes)
-				_, err = endpointInterface.Update(newEndpoint)
-				if err != nil {
-					return err
-				}
-				return nil
 			}
 		}
+		_, err = endpointInterface.Update(newEndpoint)
+		if err != nil {
+			return err
+		}
+		return nil
+
 	}
 	var scaleRefs []ControllerScaleReference
 	if annotation == IdledAtAnnotation {
