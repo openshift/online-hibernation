@@ -390,31 +390,45 @@ func (s *Sleeper) syncProject(namespace string) error {
 	}
 	quotaSecondsConsumed := math.Max(termQuotaSecondsConsumed, nonTermQuotaSecondsConsumed)
 
-	// Wake the project if project has been asleep longer than force-sleep period
-	if project.IsAsleep {
-		if time.Since(project.LastSleepTime) > s.config.ProjectSleepPeriod {
+	//Check if quota doesn't exist and should
+	if !project.LastSleepTime.IsZero() {
+		if time.Since(project.LastSleepTime) < s.config.ProjectSleepPeriod {
+			sleepQuota := s.projectSleepQuota.(*kapi.ResourceQuota)
+			quotaInterface := s.resources.KubeClient.ResourceQuotas(namespace)
+			_, err := quotaInterface.Create(sleepQuota)
+			if err != nil && !kerrors.IsAlreadyExists(err) {
+				return errors.New(fmt.Sprintf("Force-sleeper: %s", err))
+			}
+			if kerrors.IsAlreadyExists(err) {
+				return nil
+			}
+			err = s.applyProjectSleep(namespace, project.LastSleepTime, project.LastSleepTime.Add(s.config.ProjectSleepPeriod))
+			if err != nil {
+				return errors.New(fmt.Sprintf("Force-sleeper: %s", err))
+			}
+			return nil
+		} else {
+			// Wake the project if project has been asleep longer than force-sleep period
 			err := s.wakeProject(project)
 			if err != nil {
 				return errors.New(fmt.Sprintf("Force-sleeper: %s", err))
 			}
 			return nil
 		}
-	} else {
-		if quotaSecondsConsumed > s.config.Quota.Seconds() {
-			// Project-level sleep
-			glog.V(2).Infof("Force-sleeper: Project( %s )over quota! (%+vs/%+vs), applying force-sleep...", namespace, quotaSecondsConsumed, s.config.Quota.Seconds())
-			err = s.applyProjectSleep(namespace, time.Now(), time.Now().Add(s.config.ProjectSleepPeriod))
-			if err != nil {
-				return errors.New(fmt.Sprintf("Force-sleeper: Error applying project( %s )sleep quota: %s", namespace, err))
-			}
-			return nil
+	}
+	if quotaSecondsConsumed > s.config.Quota.Seconds() {
+		// Project-level sleep
+		glog.V(2).Infof("Force-sleeper: Project( %s )over quota! (%+vs/%+vs), applying force-sleep...", namespace, quotaSecondsConsumed, s.config.Quota.Seconds())
+		err = s.applyProjectSleep(namespace, time.Now(), time.Now().Add(s.config.ProjectSleepPeriod))
+		if err != nil {
+			return errors.New(fmt.Sprintf("Force-sleeper: Error applying project( %s )sleep quota: %s", namespace, err))
 		}
-
-		// Project sort index:
-		s.updateProjectSortIndex(namespace, quotaSecondsConsumed)
-		glog.V(2).Infof("Force-sleeper: Project( %s )sync complete", namespace)
 		return nil
 	}
+
+	// Project sort index:
+	s.updateProjectSortIndex(namespace, quotaSecondsConsumed)
+	glog.V(2).Infof("Force-sleeper: Project( %s )sync complete", namespace)
 	return nil
 }
 

@@ -4,6 +4,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/openshift/origin/pkg/client/testclient"
 	"github.com/stretchr/testify/assert"
 
 	kapi "k8s.io/kubernetes/pkg/api"
@@ -17,11 +18,12 @@ import (
 	deployapi "github.com/openshift/origin/pkg/deploy/api"
 )
 
-func setupClients(t *testing.T) (*ktestclient.Fake, time.Time) {
+func setupClients(t *testing.T) (*ktestclient.Fake, *testclient.Fake, time.Time) {
 	maxDeployDurSeconds := deployapi.MaxDeploymentDurationSeconds
 	deltimenow := time.Now()
 	deltimeunver := unversioned.NewTime(deltimenow)
 	deltime := &deltimeunver
+	fakeOClient := &testclient.Fake{}
 	fakeClient := &ktestclient.Fake{}
 	fakeClient.AddReactor("list", "services", func(action ktestclient.Action) (handled bool, resp runtime.Object, err error) {
 		obj := &kapi.ServiceList{
@@ -215,12 +217,12 @@ func setupClients(t *testing.T) (*ktestclient.Fake, time.Time) {
 		return true, obj, nil
 	})
 
-	return fakeClient, deltimenow
+	return fakeClient, fakeOClient, deltimenow
 }
 
 func TestCacheIsInitiallyPopulated(t *testing.T) {
-	store := NewResourceStore(map[string]bool{})
-	fakeClient, _ := setupClients(t)
+	fakeClient, fakeOClient, _ := setupClients(t)
+	store := NewResourceStore(map[string]bool{}, fakeOClient, fakeClient)
 
 	svcLW := &kcache.ListWatch{
 		ListFunc: func(options kapi.ListOptions) (runtime.Object, error) {
@@ -255,8 +257,8 @@ func TestCacheIsInitiallyPopulated(t *testing.T) {
 }
 
 func TestReplaceWithMultipleDoesNotConflict(t *testing.T) {
-	store := NewResourceStore(map[string]bool{})
-	fakeClient, deltime := setupClients(t)
+	fakeClient, fakeOClient, deltime := setupClients(t)
+	store := NewResourceStore(map[string]bool{}, fakeOClient, fakeClient)
 
 	svcLW := &kcache.ListWatch{
 		ListFunc: func(options kapi.ListOptions) (runtime.Object, error) {
