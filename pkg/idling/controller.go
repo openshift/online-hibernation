@@ -16,6 +16,7 @@ import (
 	unidlingapi "github.com/openshift/origin/pkg/unidling/api"
 	kapi "k8s.io/kubernetes/pkg/api"
 	"k8s.io/kubernetes/pkg/util/wait"
+	"k8s.io/kubernetes/pkg/util/workqueue"
 )
 
 // IdlerConfig is the configuration for the hawkular client and idler.
@@ -35,9 +36,10 @@ type IdlerConfig struct {
 }
 
 type Idler struct {
-	factory     *clientcmd.Factory
-	config      *IdlerConfig
-	resources   *cache.Cache
+	factory   *clientcmd.Factory
+	config    *IdlerConfig
+	resources *cache.Cache
+	queue     workqueue.RateLimitingInterface
 	stopChannel <-chan struct{}
 }
 
@@ -46,6 +48,7 @@ func NewIdler(ic *IdlerConfig, f *clientcmd.Factory, c *cache.Cache) *Idler {
 		config:    ic,
 		factory:   f,
 		resources: c,
+		queue:     workqueue.NewNamedRateLimitingQueue(workqueue.DefaultControllerRateLimiter(), "auto-idler"),
 	}
 	return ctrl
 }
@@ -53,9 +56,14 @@ func NewIdler(ic *IdlerConfig, f *clientcmd.Factory, c *cache.Cache) *Idler {
 // Main function for controller
 func (idler *Idler) Run(stopChan <-chan struct{}) {
 	idler.stopChannel = stopChan
-
 	// Spawn a goroutine to run project sync
 	go wait.Until(idler.sync, idler.config.IdleSyncPeriod, stopChan)
+	for i := 1; i <= idler.config.SyncWorkers; i++ {
+		go wait.Until(idler.startWorker(), time.Second, stopChan)
+	}
+	<-stopChan
+	glog.V(2).Infof("Auto-idler: Shutting down controller")
+	idler.queue.ShutDown()
 }
 
 // Spawns goroutines to sync projects
@@ -66,21 +74,34 @@ func (idler *Idler) sync() {
 		glog.Errorf("Auto-idler: %s", err)
 		return
 	}
-	namespaces := make(chan string, len(projects))
-	for i := 1; i <= idler.config.SyncWorkers; i++ {
-		go idler.startWorker(namespaces)
-	}
 	for _, namespace := range projects {
-		namespaces <- namespace.(*cache.ResourceObject).Name
+		ns := namespace.(*cache.ResourceObject).Name
+		idler.queue.Add(ns)
 	}
-	close(namespaces)
 }
 
-func (idler *Idler) startWorker(namespaces <-chan string) {
-	for namespace := range namespaces {
-		err := idler.syncProject(namespace)
-		if err != nil {
-			glog.Errorf("Auto-idler: %s", err)
+func (idler *Idler) startWorker() func() {
+	workFunc := func() bool {
+		ns, quit := idler.queue.Get()
+		if quit {
+			return true
+		}
+		defer idler.queue.Done(ns)
+		if err := idler.syncProject(ns.(string)); err != nil {
+			glog.Errorf("Error( %s ), requeuing: %v", ns.(string), err)
+			idler.queue.AddRateLimited(ns)
+			return false
+		} else {
+			idler.queue.Forget(ns)
+			return false
+		}
+	}
+	return func() {
+		for {
+			if quit := workFunc(); quit {
+				glog.V(2).Infof("Auto-idler: worker shutting down")
+				return
+			}
 		}
 	}
 }
@@ -92,7 +113,7 @@ func (idler *Idler) syncProject(namespace string) error {
 	}
 	project, err := idler.resources.GetProject(namespace)
 	if err != nil {
-		return errors.New(fmt.Sprintf("Auto-idler: %s", err))
+		return errors.New(fmt.Sprintf("%s", err))
 	}
 	if project.IsAsleep {
 		glog.V(2).Infof("Auto-idler: Ignoring project( %s ), currently in force-sleep", namespace)
@@ -103,7 +124,7 @@ func (idler *Idler) syncProject(namespace string) error {
 	// Project is not currently idled if there are any running scalable pods in namespace.
 	idled, err := CheckIdledState(idler.resources, namespace, project.IsAsleep)
 	if err != nil {
-		return errors.New(fmt.Sprintf("Auto-idler: %s", err))
+		return errors.New(fmt.Sprintf("%s", err))
 	}
 	if idled {
 		glog.V(2).Infof("Auto-idler: Project( %s )sync complete", namespace)
@@ -111,7 +132,7 @@ func (idler *Idler) syncProject(namespace string) error {
 	}
 	services, err := idler.resources.GetProjectServices(namespace)
 	if err != nil {
-		return errors.New(fmt.Sprintf("Auto-idler: %s", err))
+		return errors.New(fmt.Sprintf("%s", err))
 	}
 	if len(services) == 0 {
 		glog.V(2).Infof("Auto-idler: Project( %s )has no services, exiting", namespace)
@@ -120,7 +141,7 @@ func (idler *Idler) syncProject(namespace string) error {
 	// Get project again here, to catch any changes to 'IsAsleep' status
 	project, err = idler.resources.GetProject(namespace)
 	if err != nil {
-		return errors.New(fmt.Sprintf("Auto-idler: %s", err))
+		return errors.New(fmt.Sprintf("%s", err))
 	}
 	if project.IsAsleep {
 		glog.V(2).Infof("Auto-idler: Ignoring project( %s ), currently in force-sleep", namespace)
@@ -129,7 +150,7 @@ func (idler *Idler) syncProject(namespace string) error {
 	glog.V(2).Infof("Auto-idler: Syncing project: %s ", project.Name)
 	projPods, err := idler.resources.GetProjectPods(namespace)
 	if err != nil {
-		return errors.New(fmt.Sprintf("Auto-idler: %s", err))
+		return errors.New(fmt.Sprintf("%s", err))
 	}
 	for _, pod := range projPods {
 		// Skip the project sync if any pod in the project has not been running for a complete idling cycle, or if controller hasn't been running
@@ -140,9 +161,8 @@ func (idler *Idler) syncProject(namespace string) error {
 			return nil
 		}
 	}
-
 	if err := idler.idleIfInactive(namespace); err != nil {
-		return errors.New(fmt.Sprintf("Auto-idler: %s", err))
+		return errors.New(fmt.Sprintf("%s", err))
 	}
 	glog.V(2).Infof("Auto-idler: Project( %s )sync complete", namespace)
 	return nil
@@ -151,7 +171,7 @@ func (idler *Idler) syncProject(namespace string) error {
 func (idler *Idler) idleIfInactive(namespace string) error {
 	project, err := idler.resources.GetProject(namespace)
 	if err != nil {
-		return errors.New(fmt.Sprintf("Auto-idler: %s", err))
+		return errors.New(fmt.Sprintf("%s", err))
 	}
 	// Extra check here, not sure it's necessary
 	if project.IsAsleep {
@@ -160,11 +180,11 @@ func (idler *Idler) idleIfInactive(namespace string) error {
 	}
 	svcs, err := idler.resources.GetProjectServices(namespace)
 	if err != nil {
-		return errors.New(fmt.Sprintf("Auto-idler: %s", err))
+		return errors.New(fmt.Sprintf("%s", err))
 	}
 	projectPods, err := idler.resources.GetProjectPods(namespace)
 	if err != nil {
-		return errors.New(fmt.Sprintf("Auto-idler: %s", err))
+		return errors.New(fmt.Sprintf("%s", err))
 	}
 	var scalablePods []interface{}
 	for _, svc := range svcs {
@@ -210,7 +230,6 @@ func (idler *Idler) idleIfInactive(namespace string) error {
 	if err != nil {
 		return errors.New(fmt.Sprintf("Auto-idler: %s", err))
 	}
-
 	bp, err := c.ReadBuckets(metrics.Counter, filters...)
 	if err != nil {
 		return errors.New(fmt.Sprintf("Auto-idler: %s", err))
