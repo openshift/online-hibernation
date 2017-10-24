@@ -2,7 +2,6 @@ package idling
 
 import (
 	"encoding/json"
-	"errors"
 	"fmt"
 	"time"
 
@@ -55,7 +54,7 @@ func ScaleProjectDCs(c *cache.Cache, namespace string) error {
 		}
 	}
 	if failed {
-		return errors.New(fmt.Sprintf("Failed to scale all project( %s)DCs", namespace))
+		return fmt.Errorf("Failed to scale all project( %s)DCs", namespace)
 	}
 	return nil
 }
@@ -93,7 +92,7 @@ func ScaleProjectRCs(c *cache.Cache, namespace string) error {
 		}
 	}
 	if failed {
-		return errors.New(fmt.Sprintf("Failed to scale all project( %s )RCs", namespace))
+		return fmt.Errorf("Failed to scale all project( %s )RCs", namespace)
 	}
 	return nil
 }
@@ -117,7 +116,7 @@ func DeleteProjectPods(c *cache.Cache, namespace string) error {
 		}
 	}
 	if failed {
-		return errors.New(fmt.Sprintf("Failed to delete all project( %s )pods", namespace))
+		return fmt.Errorf("Failed to delete all project( %s )pods", namespace)
 	}
 	return nil
 }
@@ -142,7 +141,7 @@ func AddProjectPreviousScaleAnnotation(c *cache.Cache, namespace string) error {
 		}
 	}
 	if failed {
-		return errors.New(fmt.Sprintf("Failed to add previous scale annotation to all project( %s )services", namespace))
+		return fmt.Errorf("Failed to add previous scale annotation to all project( %s )services", namespace)
 	}
 	return nil
 }
@@ -167,7 +166,7 @@ func AddProjectIdledAtAnnotation(c *cache.Cache, namespace string, nowTime time.
 		}
 	}
 	if failed {
-		return errors.New(fmt.Sprintf("Failed to add idled-at annotation to all project( %s )services", namespace))
+		return fmt.Errorf("Failed to add idled-at annotation to all project( %s )services", namespace)
 	}
 	return nil
 }
