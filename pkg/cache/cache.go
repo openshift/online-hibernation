@@ -2,7 +2,6 @@ package cache
 
 import (
 	"encoding/json"
-	"errors"
 	"fmt"
 
 	osclient "github.com/openshift/origin/pkg/client"
@@ -222,12 +221,12 @@ func (c *Cache) GetAndCopyEndpoint(namespace, name string) (*kapi.Endpoints, err
 	endpoint, err := endpointInterface.Get(name)
 	if err != nil {
 		if !kerrors.IsNotFound(err) {
-			return nil, errors.New(fmt.Sprintf("Error getting endpoint in namespace( %s ): %s", namespace, err))
+			return nil, fmt.Errorf("Error getting endpoint in namespace( %s ): %s", namespace, err)
 		}
 	}
 	copy, err := kapi.Scheme.DeepCopy(endpoint)
 	if err != nil {
-		return nil, errors.New(fmt.Sprintf("Error copying endpoint in namespace( %s ): %s", namespace, err))
+		return nil, fmt.Errorf("Error copying endpoint in namespace( %s ): %s", namespace, err)
 	}
 	newEndpoint := copy.(*kapi.Endpoints)
 
