@@ -18,6 +18,8 @@ import (
 	"k8s.io/kubernetes/pkg/util/workqueue"
 )
 
+const MaxRetries = 2
+
 // IdlerConfig is the configuration for the hawkular client and idler.
 type IdlerConfig struct {
 	Exclude            map[string]bool
@@ -35,10 +37,10 @@ type IdlerConfig struct {
 }
 
 type Idler struct {
-	factory   *clientcmd.Factory
-	config    *IdlerConfig
-	resources *cache.Cache
-	queue     workqueue.RateLimitingInterface
+	factory     *clientcmd.Factory
+	config      *IdlerConfig
+	resources   *cache.Cache
+	queue       workqueue.RateLimitingInterface
 	stopChannel <-chan struct{}
 }
 
@@ -87,9 +89,15 @@ func (idler *Idler) startWorker() func() {
 		}
 		defer idler.queue.Done(ns)
 		if err := idler.syncProject(ns.(string)); err != nil {
-			glog.Errorf("Error( %s ), requeuing: %v", ns.(string), err)
-			idler.queue.AddRateLimited(ns)
-			return false
+			if idler.queue.NumRequeues(ns) > MaxRetries {
+				glog.V(2).Infof("Auto-idler: Unable to sync( %s ), no more retries left", ns.(string))
+				idler.queue.Forget(ns)
+				return false
+			} else {
+				glog.V(2).Infof("Auto-idler: Unable to fully sync( %s ), requeuing: %v", ns.(string), err)
+				idler.queue.AddRateLimited(ns)
+				return false
+			}
 		} else {
 			idler.queue.Forget(ns)
 			return false
@@ -98,7 +106,7 @@ func (idler *Idler) startWorker() func() {
 	return func() {
 		for {
 			if quit := workFunc(); quit {
-				glog.V(2).Infof("Auto-idler: worker shutting down")
+				glog.V(2).Infof("Auto-idler: Worker shutting down")
 				return
 			}
 		}
