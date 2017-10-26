@@ -392,15 +392,6 @@ func (s *Sleeper) syncProject(namespace string) error {
 	//Check if quota doesn't exist and should
 	if !project.LastSleepTime.IsZero() {
 		if time.Since(project.LastSleepTime) < s.config.ProjectSleepPeriod {
-			sleepQuota := s.projectSleepQuota.(*kapi.ResourceQuota)
-			quotaInterface := s.resources.KubeClient.ResourceQuotas(namespace)
-			_, err := quotaInterface.Create(sleepQuota)
-			if err != nil && !kerrors.IsAlreadyExists(err) {
-				return fmt.Errorf("Force-sleeper: %s", err)
-			}
-			if kerrors.IsAlreadyExists(err) {
-				return nil
-			}
 			err = s.applyProjectSleep(namespace, project.LastSleepTime, project.LastSleepTime.Add(s.config.ProjectSleepPeriod))
 			if err != nil {
 				return fmt.Errorf("Force-sleeper: %s", err)

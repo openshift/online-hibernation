@@ -57,6 +57,7 @@ func TestSyncProject(t *testing.T) {
 			ProjectSleepPeriod: "8h",
 			TermQuota:          "1G",
 			NonTermQuota:       "1G",
+			DryRun:             false,
 			Projects:           []string{"test"},
 			ResourceQuotas: []*kapi.ResourceQuota{
 				quota("compute-resources", "test", "1G", "1"),
@@ -94,12 +95,83 @@ func TestSyncProject(t *testing.T) {
 			},
 		},
 
+		"Do not apply force-sleep if in dry-run mode and project is supposed to be 'asleep'": {
+			Quota:              "16h",
+			Period:             "24h",
+			ProjectSleepPeriod: "8h",
+			TermQuota:          "1G",
+			NonTermQuota:       "1G",
+			DryRun:             true,
+			Projects:           []string{"test"},
+			ResourceQuotas: []*kapi.ResourceQuota{
+				quota("compute-resources", "test", "1G", "1"),
+			},
+			Pods: []*kapi.Pod{
+				pod("pod1", "test"),
+			},
+			ReplicationControllers: []*kapi.ReplicationController{
+				rc("rc1", "test"),
+			},
+			DeploymentConfigs: []*deployapi.DeploymentConfig{
+				dc("dc1", "test"),
+			},
+			Resources: []*cache.ResourceObject{
+				projectResource("test", true, time.Now().Add(-4*time.Hour)),
+				rcResource("rc1", "rc1", "test", "1", "dc1", []*cache.RunningTime{
+					runningTime(time.Now().Add(-16*time.Hour), time.Time{}),
+				}),
+				podResource("pod1", "pod1", "test", "1",
+					resource.MustParse("1G"),
+					[]*cache.RunningTime{
+						runningTime(time.Now().Add(-16*time.Hour), time.Time{}),
+					}),
+			},
+			ExpectedOpenshiftActions: []action{},
+			ExpectedKubeActions:      []action{},
+		},
+
+		"Do not apply force-sleep if in dry-run mode": {
+			Quota:              "16h",
+			Period:             "24h",
+			ProjectSleepPeriod: "8h",
+			TermQuota:          "1G",
+			NonTermQuota:       "1G",
+			DryRun:             true,
+			Projects:           []string{"test"},
+			ResourceQuotas: []*kapi.ResourceQuota{
+				quota("compute-resources", "test", "1G", "1"),
+			},
+			Pods: []*kapi.Pod{
+				pod("pod1", "test"),
+			},
+			ReplicationControllers: []*kapi.ReplicationController{
+				rc("rc1", "test"),
+			},
+			DeploymentConfigs: []*deployapi.DeploymentConfig{
+				dc("dc1", "test"),
+			},
+			Resources: []*cache.ResourceObject{
+				projectResource("test", false, time.Time{}),
+				rcResource("rc1", "rc1", "test", "1", "dc1", []*cache.RunningTime{
+					runningTime(time.Now().Add(-16*time.Hour), time.Time{}),
+				}),
+				podResource("pod1", "pod1", "test", "1",
+					resource.MustParse("1G"),
+					[]*cache.RunningTime{
+						runningTime(time.Now().Add(-16*time.Hour), time.Time{}),
+					}),
+			},
+			ExpectedOpenshiftActions: []action{},
+			ExpectedKubeActions:      []action{},
+		},
+
 		"Remove force-sleep from project that has slept for its time": {
 			Quota:              "16h",
 			Period:             "24h",
 			ProjectSleepPeriod: "8h",
 			TermQuota:          "1G",
 			NonTermQuota:       "1G",
+			DryRun:             false,
 			Projects:           []string{"test"},
 			ResourceQuotas: []*kapi.ResourceQuota{
 				quota("compute-resources", "test", "1G", "1"),
@@ -132,6 +204,7 @@ func TestSyncProject(t *testing.T) {
 			ProjectSleepPeriod: "8h",
 			TermQuota:          "1G",
 			NonTermQuota:       "1G",
+			DryRun:             false,
 			Projects:           []string{"test"},
 			ResourceQuotas: []*kapi.ResourceQuota{
 				quota("compute-resources", "test", "1G", "1"),
@@ -168,6 +241,7 @@ func TestSyncProject(t *testing.T) {
 			ProjectSleepPeriod: "8h",
 			TermQuota:          "1G",
 			NonTermQuota:       "1G",
+			DryRun:             false,
 			Projects:           []string{"test"},
 			ResourceQuotas: []*kapi.ResourceQuota{
 				quota("compute-resources", "test", "1G", "2"),
@@ -220,6 +294,7 @@ func TestSyncProject(t *testing.T) {
 			ProjectSleepPeriod: "8h",
 			TermQuota:          "1G",
 			NonTermQuota:       "1G",
+			DryRun:             false,
 			Projects:           []string{"test"},
 			ResourceQuotas: []*kapi.ResourceQuota{
 				quota("compute-resources", "test", "1G", "2"),
@@ -283,6 +358,7 @@ func TestSyncProject(t *testing.T) {
 			ProjectSleepPeriod: "8h",
 			TermQuota:          "1G",
 			NonTermQuota:       "1G",
+			DryRun:             false,
 			Projects:           []string{"test"},
 			ResourceQuotas: []*kapi.ResourceQuota{
 				quota("compute-resources", "test", "1G", "1"),
@@ -321,6 +397,7 @@ func TestSyncProject(t *testing.T) {
 			ProjectSleepPeriod: "8h",
 			TermQuota:          "1G",
 			NonTermQuota:       "1G",
+			DryRun:             false,
 			Projects:           []string{"test"},
 			ResourceQuotas: []*kapi.ResourceQuota{
 				quota("compute-resources", "test", "1G", "2"),
@@ -383,7 +460,7 @@ func TestSyncProject(t *testing.T) {
 			ProjectSleepPeriod: projectSleepPeriod,
 			TermQuota:          resource.MustParse(test.TermQuota),
 			NonTermQuota:       resource.MustParse(test.NonTermQuota),
-			DryRun:             false,
+			DryRun:             test.DryRun,
 		}
 		kc := &ktestclient.Fake{}
 		kc.AddReactor("list", "resourcequotas", func(action ktestclient.Action) (handled bool, ret runtime.Object, err error) {
