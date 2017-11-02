@@ -1,98 +1,95 @@
 apiVersion: v1
 kind: Template
 metadata:
-  name: "sleep-idler"
+  name: "hibernation"
+
 parameters:
-- name: QUOTA_HOURS
-  description: Maximum quota-hours allowed in period before force sleep
-  value: "16h"
-
-- name: TERMINATING_QUOTA
-  description: Quota for terminating pods
-  value: "1Gi"
-
-- name: NONTERMINATING_QUOTA
-  description: Quota for nonterminating pods
-  value: "1Gi"
-
-- name: PERIOD
-  description: Length of period in hours for quota consumption
-  value: "24h"
 
 - name: NAME
   description: The name of the DeploymentConfig.
-  value: sleep-idler
-
+  value: hibernation
+- name: GIT_REPO
+  description: Git repository housing the Dockerfile and code to build and deploy.
+  value: "https://github.com/openshift/online-hibernation.git"
+- name: GIT_REF
+  description: Git branch, commit, or tag to deploy.
+  value: "master"
+- name: QUOTA_HOURS
+  description: Maximum quota-hours allowed in period before force sleep
+  value: "16h"
+- name: TERMINATING_QUOTA
+  description: Quota for terminating pods
+  value: "1Gi"
+- name: NONTERMINATING_QUOTA
+  description: Quota for nonterminating pods
+  value: "1Gi"
+- name: PERIOD
+  description: Length of period in hours for quota consumption
+  value: "24h"
 - name: SLEEP_SYNC_PERIOD
   description: Interval to sync project status
   value: "1h"
-
 - name: PROJECT_SLEEP_LENGTH
   description: Length of time to apply force-sleep to projects over quota.
   value: "8h"
-
-- name: WORKERS
-  description: Number of worker threads to process project sync
-  value: "10"
-
 - name: EXCLUDE_NAMESPACES
   description: Comma-separated list of namespace to exclude in quota enforcement
-  value: "openshift,openshift-infra,default"
-
+  value: "openshift,openshift-infra,default,logging,kube-system,kube-public,management-infra,ops-health-monitoring"
 - name: IDLE_SYNC_PERIOD
   description: Interval to sync project status for idler
-  value: "10m"
-
+  value: "30m"
 - name: IDLE_QUERY_PERIOD
   description: Interval to query project network activity for idler
-  value: "10m"
-
+  value: "30m"
 - name: HAWKULAR_URL
   description: Hawkular API url.
   value: "https://hawkular-metrics.openshift-infra.svc.cluster.local"
-
 - name: HAWKULAR_INSECURE
   description: Boolean to allow access to Hawkular API without certs.
-  value: "true"
-
+  value: "false"
 - name: IDLE_THRESHOLD
   description: Network activity received (bytes) or less that will result in idling.
-  value: "20000"
-
+  value: "40000"
 - name: IN_CLUSTER
-  description: Boolean for whether sleep-idler is running in the cluster.
+  description: Boolean for whether hibernation is running in the cluster.
   value: "true"
-
 - name: IDLE_DRYRUN
   description: Boolean for idler dry-run mode, where projects will be logged but not idled.
   value: "true"
-
+- name: SLEEP_DRYRUN
+  description: Boolean for sleeper dry-run mode, where projects will be logged but not modified.
+  value: "true"
 - name: IMAGE_PULL_POLICY
   description: The image pull policy (configurable to facilitate testing)
   value: IfNotPresent
-
-- name: FORCE_SLEEP_IMAGE
-  description: The force sleep docker image
-  value: openshift/force-sleep:latest
-
+- name: HIBERNATION_IMAGE
+  description: The hibernation image
+  value: hibernation
 - name: LOG_LEVEL
   description: Verbosity level for glogging
-  value: "3"
-
-- name: METRICS_PORT
-  description: Port to create a service for http metrics requests
-  value: "8080"
-
+  value: "2"
 - name: METRICS_COLLECT_RUNTIME
   description: Enable runtime metrics
   value: "true"
-
 - name: METRICS_COLLECT_CACHE
   description: Enable controller cache metrics
   value: "true"
+- name: CPU_REQUEST
+  description: CPU resource request
+  value: "250m"
+- name: CPU_LIMIT
+  description: Memory resource request
+  value: "2"
+- name: MEMORY_REQUEST
+  description: Memory resource request
+  value: "1Gi"
+- name: MEMORY_LIMIT
+  description: Memory resource limit
+  value: "2500Mi"
 
 objects:
-# A role for force sleep
+
+# A role for hibernation
 - apiVersion: v1
   kind: ClusterRole
   metadata:
@@ -116,11 +113,13 @@ objects:
     - create
     - update
     - delete
-# A service account for use by force sleep
+
+# A service account for use by hibernation
 - apiVersion: v1
   kind: ServiceAccount
   metadata:
     name: ${NAME}
+
 # A service to expose the metrics server
 - apiVersion: v1
   kind: Service
@@ -130,9 +129,10 @@ objects:
     ports:
     - name: "metrics"
       protocol: TCP
-      port: ${METRICS_PORT}
+      port: 8080
       targetPort: "metrics"
-# Binds the service account to the force sleep role
+
+# Binds the service account to the hibernation role
 - apiVersion: v1
   kind: ClusterRoleBinding
   metadata:
@@ -143,35 +143,66 @@ objects:
   - kind: ServiceAccount
     name: ${NAME}
     namespace: openshift-infra
-# The force sleep application
+
+- apiVersion: v1
+  kind: ImageStream
+  metadata:
+    name: ${NAME}
+  spec:
+  status:
+    dockerImageRepository:
+
+- kind: BuildConfig
+  apiVersion: v1
+  metadata:
+    name: ${NAME}
+  spec:
+    source:
+      git:
+        uri: ${GIT_REPO}
+        ref: ${GIT_REF}
+    strategy:
+      dockerStrategy:
+        from:
+          kind: DockerImage
+          name: golang:1.7
+    output:
+      to:
+        kind: ImageStreamTag
+        name: ${NAME}:latest
+    triggers:
+      - type: ConfigChange
+
+# The hibernation application
 - apiVersion: v1
   kind: DeploymentConfig
   metadata:
     name: ${NAME}
   spec:
-    replicas: 1
-    selector:
-      app: ${NAME}
     strategy:
       type: Recreate
     triggers:
-    - type: ConfigChange
+      - type: ImageChange
+        imageChangeParams:
+          automatic: true
+          containerNames:
+            - ${NAME}
+          from:
+            kind: ImageStreamTag
+            name: ${NAME}:latest
+      - type: ConfigChange
+    replicas: 1
+    selector:
+      name: ${NAME}
     template:
       metadata:
         labels:
-          app: ${NAME}
+          name: ${NAME}
       spec:
         serviceAccountName: ${NAME}
-        volumes:
-        - name: hawkular
-          secret:
-            secretName: hawkular-metrics-certs
-            items:
-            - key: ca.crt
-              path: ca.crt
         containers:
         - name: ${NAME}
-          image: ${FORCE_SLEEP_IMAGE}
+          image: ${HIBERNATION_IMAGE}
           imagePullPolicy: ${IMAGE_PULL_POLICY}
           ports:
           - name: "metrics"
@@ -181,61 +212,39 @@ objects:
           - name: hawkular
             mountPath: /var/run/hawkular
             readOnly: true
-          env:
-          - name: QUOTA_HOURS
-            value: ${QUOTA_HOURS}
-          - name: PERIOD
-            value: ${PERIOD}
-          - name: SLEEP_SYNC_PERIOD
-            value: ${SLEEP_SYNC_PERIOD}
-          - name: PROJECT_SLEEP_LENGTH
-            value: ${PROJECT_SLEEP_LENGTH}
-          - name: WORKERS
-            value: ${WORKERS}
-          - name: EXCLUDE_NAMESPACES
-            value: ${EXCLUDE_NAMESPACES}
-          - name: TERMINATING_QUOTA
-            value: ${TERMINATING_QUOTA}
-          - name: NONTERMINATING_QUOTA
-            value: ${NONTERMINATING_QUOTA}
-          - name: IDLE_SYNC_PERIOD
-            value: ${IDLE_SYNC_PERIOD}
-          - name: IDLE_QUERY_PERIOD
-            value: ${IDLE_QUERY_PERIOD}
-          - name: HAWKULAR_URL
-            value: ${HAWKULAR_URL}
-          - name: HAWKULAR_INSECURE
-            value: ${HAWKULAR_INSECURE}
-          - name: IDLE_THRESHOLD
-            value: ${IDLE_THRESHOLD}
-          - name: IN_CLUSTER
-            value: ${IN_CLUSTER}
-          - name: IDLE_DRYRUN
-            value: ${IDLE_DRYRUN}
-          - name: LOG_LEVEL
-            value: ${LOG_LEVEL}
-          - name: METRICS_COLLECT_RUNTIME
-            value: ${METRICS_COLLECT_RUNTIME}
-          - name: METRICS_COLLECT_CACHE
-            value: ${METRICS_COLLECT_CACHE}
+          resources:
+            requests:
+              memory: ${MEMORY_REQUEST}
+              cpu: ${CPU_REQUEST}
+            limits:
+              memory: ${MEMORY_LIMIT}
+              cpu: ${CPU_LIMIT}
           command:
           - /go/bin/force-sleep
-          - -quota=$(QUOTA_HOURS)
-          - -period=$(PERIOD)
-          - -sleep-sync-period=$(SLEEP_SYNC_PERIOD)
-          - -z=$(PROJECT_SLEEP_LENGTH)
-          - -w=$(WORKERS)
-          - -exclude-namespace=$(EXCLUDE_NAMESPACES)
-          - -terminating=$(TERMINATING_QUOTA)
-          - -nonterminating=$(NONTERMINATING_QUOTA)
-          - -idle-sync-period=$(IDLE_SYNC_PERIOD)
-          - -idle-query-period=$(IDLE_QUERY_PERIOD)
-          - -hawkular-url=$(HAWKULAR_URL)
-          - -insecure=$(HAWKULAR_INSECURE)
-          - -in-cluster=$(IN_CLUSTER)
-          - -idle-dry-run=$(IDLE_DRYRUN)
+          - -quota=${QUOTA_HOURS}
+          - -period=${PERIOD}
+          - -sleep-sync-period=${SLEEP_SYNC_PERIOD}
+          - -z=${PROJECT_SLEEP_LENGTH}
+          - -w=10
+          - -exclude-namespace=${EXCLUDE_NAMESPACES}
+          - -terminating=${TERMINATING_QUOTA}
+          - -nonterminating=${NONTERMINATING_QUOTA}
+          - -idle-sync-period=${IDLE_SYNC_PERIOD}
+          - -idle-query-period=${IDLE_QUERY_PERIOD}
+          - -hawkular-url=${HAWKULAR_URL}
+          - -insecure=${HAWKULAR_INSECURE}
+          - -in-cluster=${IN_CLUSTER}
+          - -idle-dry-run=${IDLE_DRYRUN}
+          - -sleep-dry-run=${SLEEP_DRYRUN}
           - -idle-threshold=${IDLE_THRESHOLD}
-          - -v=$(LOG_LEVEL)
+          - -v=${LOG_LEVEL}
           - -logtostderr
-          - -collectRuntime=$(METRICS_COLLECT_RUNTIME)
-          - -collectCache=$(METRICS_COLLECT_CACHE)
+          - -collectRuntime=${METRICS_COLLECT_RUNTIME}
+          - -collectCache=${METRICS_COLLECT_CACHE}
+        volumes:
+        - name: hawkular
+          secret:
+            secretName: hawkular-metrics-certs
+            items:
+            - key: ca.crt
+              path: ca.crt
