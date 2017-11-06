@@ -1,6 +1,9 @@
 # Old-skool build tools.
 
-.DEFAULT_GOAL := help
+.DEFAULT_GOAL := build
+
+ARCH?=amd64
+OUT_DIR?=./_output
 
 TAG ?= openshift/online-hibernation
 TARGET ?= prod
@@ -12,10 +15,9 @@ endif
 
 # Builds and installs the hibernation binary.
 build: check-gopath
-	go install \
-		github.com/openshift/online-hibernation/cmd/force-sleep
+	CGO_ENABLED=0 GOARCH=$(ARCH) go build -a \
+		-o $(OUT_DIR)/$(ARCH)/hibernate github.com/openshift/online-hibernation/cmd/hibernate
 .PHONY: build
-
 
 # Runs the integration tests.
 #

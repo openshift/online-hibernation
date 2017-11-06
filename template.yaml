@@ -34,7 +34,7 @@ parameters:
   value: "8h"
 - name: EXCLUDE_NAMESPACES
   description: Comma-separated list of namespace to exclude in quota enforcement
-  value: "openshift,openshift-infra,default,logging,kube-system,kube-public,management-infra,ops-health-monitoring"
+  value: "openshift,openshift-infra,openshift-node,default,logging,kube-system,kube-public,management-infra,ops-health-monitoring"
 - name: IDLE_SYNC_PERIOD
   description: Interval to sync project status for idler
   value: "30m"
@@ -220,7 +220,7 @@ objects:
               memory: ${MEMORY_LIMIT}
               cpu: ${CPU_LIMIT}
           command:
-          - /go/bin/force-sleep
+          - /go/bin/hibernate
           - -quota=${QUOTA_HOURS}
           - -period=${PERIOD}
           - -sleep-sync-period=${SLEEP_SYNC_PERIOD}

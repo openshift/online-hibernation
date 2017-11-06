@@ -21,5 +21,6 @@ ADD . /go/src/github.com/openshift/online-hibernation
 
 WORKDIR /go/src/github.com/openshift/online-hibernation
 RUN make build TARGET=prod
-ENTRYPOINT ["force-sleep"]
+RUN ln -s /go/src/github.com/openshift/online-hibernation/_output/amd64/hibernate /go/bin/hibernate
+ENTRYPOINT ["hibernate"]
 
