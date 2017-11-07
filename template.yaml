@@ -34,25 +34,16 @@ parameters:
   value: "8h"
 - name: EXCLUDE_NAMESPACES
   description: Comma-separated list of namespace to exclude in quota enforcement
-  value: "openshift,openshift-infra,default,logging,kube-system,kube-public,management-infra,ops-health-monitoring"
+  value: "openshift,openshift-infra,openshift-node,default,logging,kube-system,kube-public,management-infra,ops-health-monitoring,prometheus"
 - name: IDLE_SYNC_PERIOD
   description: Interval to sync project status for idler
   value: "30m"
 - name: IDLE_QUERY_PERIOD
   description: Interval to query project network activity for idler
   value: "30m"
-- name: HAWKULAR_URL
-  description: Hawkular API url.
-  value: "https://hawkular-metrics.openshift-infra.svc.cluster.local"
-- name: HAWKULAR_INSECURE
-  description: Boolean to allow access to Hawkular API without certs.
-  value: "false"
 - name: IDLE_THRESHOLD
   description: Network activity received (bytes) or less that will result in idling.
   value: "40000"
-- name: IN_CLUSTER
-  description: Boolean for whether hibernation is running in the cluster.
-  value: "true"
 - name: IDLE_DRYRUN
   description: Boolean for idler dry-run mode, where projects will be logged but not idled.
   value: "true"
@@ -208,10 +199,6 @@ objects:
           - name: "metrics"
             containerPort: 8080
             protocol: TCP
-          volumeMounts:
-          - name: hawkular
-            mountPath: /var/run/hawkular
-            readOnly: true
           resources:
             requests:
               memory: ${MEMORY_REQUEST}
@@ -220,7 +207,7 @@ objects:
               memory: ${MEMORY_LIMIT}
               cpu: ${CPU_LIMIT}
           command:
-          - /go/bin/force-sleep
+          - /go/bin/hibernate
           - -quota=${QUOTA_HOURS}
           - -period=${PERIOD}
           - -sleep-sync-period=${SLEEP_SYNC_PERIOD}
@@ -231,9 +218,6 @@ objects:
           - -nonterminating=${NONTERMINATING_QUOTA}
           - -idle-sync-period=${IDLE_SYNC_PERIOD}
           - -idle-query-period=${IDLE_QUERY_PERIOD}
-          - -hawkular-url=${HAWKULAR_URL}
-          - -insecure=${HAWKULAR_INSECURE}
-          - -in-cluster=${IN_CLUSTER}
           - -idle-dry-run=${IDLE_DRYRUN}
           - -sleep-dry-run=${SLEEP_DRYRUN}
           - -idle-threshold=${IDLE_THRESHOLD}
@@ -241,10 +225,3 @@ objects:
           - -logtostderr
           - -collectRuntime=${METRICS_COLLECT_RUNTIME}
           - -collectCache=${METRICS_COLLECT_CACHE}
-        volumes:
-        - name: hawkular
-          secret:
-            secretName: hawkular-metrics-certs
-            items:
-            - key: ca.crt
-              path: ca.crt

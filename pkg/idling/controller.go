@@ -1,18 +1,18 @@
 package idling
 
 import (
-	"crypto/tls"
-	"crypto/x509"
 	"fmt"
 	"time"
 
 	"github.com/golang/glog"
-	"github.com/hawkular/hawkular-client-go/metrics"
 	"github.com/openshift/online-hibernation/pkg/cache"
 	"github.com/openshift/origin/pkg/cmd/util/clientcmd"
+	"github.com/prometheus/client_golang/api/prometheus"
+	"github.com/prometheus/common/model"
 
 	buildapi "github.com/openshift/origin/pkg/build/api"
 	unidlingapi "github.com/openshift/origin/pkg/unidling/api"
+	"golang.org/x/net/context"
 	kapi "k8s.io/kubernetes/pkg/api"
 	"k8s.io/kubernetes/pkg/util/wait"
 	"k8s.io/kubernetes/pkg/util/workqueue"
@@ -20,22 +20,19 @@ import (
 
 const MaxRetries = 2
 
-// IdlerConfig is the configuration for the hawkular client and idler.
+// IdlerConfig is the configuration for the prometheus client and idler.
 type IdlerConfig struct {
 	Exclude            map[string]bool
-	Url                string
+	PrometheusClient   prometheus.Client
 	IdleSyncPeriod     time.Duration
 	IdleQueryPeriod    time.Duration
-	CA                 string
-	Token              string
-	HawkularInsecure   bool
 	Threshold          int
 	SyncWorkers        int
 	IdleDryRun         bool
-	InCluster          bool
 	ProjectSleepPeriod time.Duration
 }
 
+// Idler is the auto-idler object
 type Idler struct {
 	factory     *clientcmd.Factory
 	config      *IdlerConfig
@@ -44,6 +41,7 @@ type Idler struct {
 	stopChannel <-chan struct{}
 }
 
+// NewIdler returns an Idler object
 func NewIdler(ic *IdlerConfig, f *clientcmd.Factory, c *cache.Cache) *Idler {
 	ctrl := &Idler{
 		config:    ic,
@@ -54,7 +52,34 @@ func NewIdler(ic *IdlerConfig, f *clientcmd.Factory, c *cache.Cache) *Idler {
 	return ctrl
 }
 
-// Main function for controller
+// getNetworkActivity queries prometheus to get a sum of network activity received
+// over the IdleQueryPeriod for all pods, separated by namespace.  Only results with
+// network activity below the idler threshold are returned.  This function returns
+// a map of namespace:networkActivity (bytes).
+func (idler *Idler) getNetworkActivity() (map[string]float64, error) {
+	queryAPI := prometheus.NewQueryAPI(idler.config.PrometheusClient)
+	// ic.Threshold can only be set via command line flags
+	query_string := fmt.Sprintf(`sum(delta(container_network_receive_bytes_total{namespace!=""}[%s])) by (namespace) < %v`, model.Duration(idler.config.IdleQueryPeriod).String(), idler.config.Threshold)
+	result, err := queryAPI.Query(context.TODO(), query_string, time.Now())
+	if err != nil {
+		return nil, err
+	}
+	var namespace string
+	netmap := make(map[string]float64)
+	vec := result.(model.Vector)
+	for _, v := range vec {
+		nsMap := v.Metric
+		val := v.Value
+		for _, ns := range nsMap {
+			namespace = string(ns)
+		}
+		netmap[namespace] = float64(val)
+	}
+	return netmap, nil
+}
+
+// Run starts the idler controller and keeps it going until
+// the given channel is closed.
 func (idler *Idler) Run(stopChan <-chan struct{}) {
 	idler.stopChannel = stopChan
 	// Spawn a goroutine to run project sync
@@ -67,7 +92,11 @@ func (idler *Idler) Run(stopChan <-chan struct{}) {
 	idler.queue.ShutDown()
 }
 
-// Spawns goroutines to sync projects
+// sync matches projects that should be idled and adds them to the workqueue.
+// If a project has scalable resources, is not in 
+// the exclude_namespace list, is in the map of projects below the idling 
+// threshold and if the idler is not in DryRun mode, then that project name is 
+// added to the queue of projects to be idled.
 func (idler *Idler) sync() {
 	glog.V(1).Infof("Auto-idler: Running project sync")
 	projects, err := idler.resources.Indexer.ByIndex("ofKind", cache.ProjectKind)
@@ -75,12 +104,44 @@ func (idler *Idler) sync() {
 		glog.Errorf("Auto-idler: %s", err)
 		return
 	}
+	netmap, err := idler.getNetworkActivity()
+	if err != nil {
+		glog.Errorf("Auto-idler: %s", err)
+		return
+	}
 	for _, namespace := range projects {
 		ns := namespace.(*cache.ResourceObject).Name
-		idler.queue.Add(ns)
+		scalable, err := idler.checkForScalables(ns)
+		if err != nil {
+			glog.Errorf("Auto-idler: %s", err)
+		}
+		if !scalable {
+			// Run checkIdledState here to gather information for logs
+			_, _ = checkIdledState(idler.resources, ns, namespace.(*cache.ResourceObject).IsAsleep)
+			glog.V(2).Infof("Auto-idler: Project( %s )sync complete", ns)
+			continue
+		}
+		if !idler.config.Exclude[ns] {
+			nsInMap := false
+			if bytes, ok := netmap[ns]; ok {
+				nsInMap = true
+				if idler.config.IdleDryRun {
+					glog.V(2).Infof("Auto-idler: Project( %s )netrx bytes( %v )below idling threshold, but currently in DryRun mode", ns, bytes)
+				} else {
+					glog.V(2).Infof("Auto-idler: Project( %s )netrx bytes( %v )below idling threshold", ns, bytes)
+					idler.queue.Add(ns)
+				}
+			}
+			if !nsInMap {
+				// Only way to get here is if proj has scalable pods but not in returned map of below_threshold projs
+				glog.V(2).Infof("Auto-idler: Project( %s )network activity above idling threshold", ns)
+				glog.V(2).Infof("Auto-idler: Project( %s )sync complete", ns)
+			}
+		}
 	}
 }
 
+// startWorker gets items from the queue hands them to syncProject
 func (idler *Idler) startWorker() func() {
 	workFunc := func() bool {
 		ns, quit := idler.queue.Get()
@@ -113,11 +174,9 @@ func (idler *Idler) startWorker() func() {
 	}
 }
 
-// Sync projects and idle if necessary.
+// syncProject gets project from the cache, does a final check for 
+// IsAsleep and IsIdled and then calls autoIdleProjectServices.
 func (idler *Idler) syncProject(namespace string) error {
-	if idler.config.Exclude[namespace] {
-		return nil
-	}
 	project, err := idler.resources.GetProject(namespace)
 	if err != nil {
 		return err
@@ -126,10 +185,13 @@ func (idler *Idler) syncProject(namespace string) error {
 		glog.V(2).Infof("Auto-idler: Ignoring project( %s ), currently in force-sleep", namespace)
 		return nil
 	}
+	// Only way this could be idled here is if user was manually idling project at same
+	// time sync() was running.  Projects with 0 scalable pods would not be added to
+	// the queue.
 	// If true, endpoints in namespace are currently idled,
 	// i.e. endpoints in project have idling annotations and len(scalablePods)==0
 	// Project is not currently idled if there are any running scalable pods in namespace.
-	idled, err := CheckIdledState(idler.resources, namespace, project.IsAsleep)
+	idled, err := checkIdledState(idler.resources, namespace, project.IsAsleep)
 	if err != nil {
 		return err
 	}
@@ -137,61 +199,55 @@ func (idler *Idler) syncProject(namespace string) error {
 		glog.V(2).Infof("Auto-idler: Project( %s )sync complete", namespace)
 		return nil
 	}
-	services, err := idler.resources.GetProjectServices(namespace)
-	if err != nil {
-		return err
-	}
-	if len(services) == 0 {
-		glog.V(2).Infof("Auto-idler: Project( %s )has no services, exiting", namespace)
-		return nil
-	}
-	// Get project again here, to catch any changes to 'IsAsleep' status
-	project, err = idler.resources.GetProject(namespace)
-	if err != nil {
-		return err
-	}
-	if project.IsAsleep {
-		glog.V(2).Infof("Auto-idler: Ignoring project( %s ), currently in force-sleep", namespace)
-		return nil
-	}
 	glog.V(2).Infof("Auto-idler: Syncing project: %s ", project.Name)
-	projPods, err := idler.resources.GetProjectPods(namespace)
+	glog.V(2).Infof("Auto-idler: Idling project( %s )", namespace)
+	err = idler.autoIdleProjectServices(namespace)
 	if err != nil {
-		return err
-	}
-	for _, pod := range projPods {
-		// Skip the project sync if any pod in the project has not been running for a complete idling cycle, or if controller hasn't been running
-		// for complete idling cycle.
-		if time.Since(pod.(*cache.ResourceObject).RunningTimes[0].Start) < idler.config.IdleQueryPeriod {
-			glog.V(2).Infof("Auto-idler: Ignoring project( %s ), either pod( %s )or controller hasn't been running for complete idling cycle", namespace, pod.(*cache.ResourceObject).Name)
-			glog.V(2).Infof("Auto-idler: Project( %s )sync complete", namespace)
-			return nil
-		}
-	}
-	if err := idler.idleIfInactive(namespace); err != nil {
 		return err
 	}
 	glog.V(2).Infof("Auto-idler: Project( %s )sync complete", namespace)
 	return nil
 }
 
-func (idler *Idler) idleIfInactive(namespace string) error {
+// checkForScalables returns true if there are scalable resources 
+// associated with pods in a namespace
+func (idler *Idler) checkForScalables(namespace string) (bool, error) {
+	scalable := false
 	project, err := idler.resources.GetProject(namespace)
 	if err != nil {
-		return err
+		return scalable, err
 	}
 	// Extra check here, not sure it's necessary
 	if project.IsAsleep {
 		glog.V(2).Infof("Auto-idler: Ignoring project( %s ), currently in force-sleep.", namespace)
-		return nil
+		return scalable, nil
 	}
 	svcs, err := idler.resources.GetProjectServices(namespace)
 	if err != nil {
-		return err
+		return scalable, err
 	}
+	if len(svcs) == 0 {
+		glog.V(2).Infof("Auto-idler: Project( %s )has no services", namespace)
+		return scalable, nil
+	}
+
 	projectPods, err := idler.resources.GetProjectPods(namespace)
 	if err != nil {
-		return err
+		return scalable, err
+	}
+
+	for _, podObj := range projectPods {
+		pod := podObj.(*cache.ResourceObject)
+		if _, ok := pod.Labels[buildapi.BuildAnnotation]; ok {
+			if pod.IsStarted() {
+				glog.V(2).Infof("Auto-idler: Ignoring project( %s ), builder pod( %s ) found in project.", namespace, pod.Name)
+				return scalable, nil
+			}
+		}
+		if time.Since(pod.RunningTimes[0].Start) < idler.config.IdleQueryPeriod {
+			glog.V(2).Infof("Auto-idler: Ignoring project( %s ), either pod( %s )or controller hasn't been running for complete idling cycle.", namespace, pod.Name)
+			return scalable, nil
+		}
 	}
 	var scalablePods []interface{}
 	for _, svc := range svcs {
@@ -203,136 +259,19 @@ func (idler *Idler) idleIfInactive(namespace string) error {
 	}
 	// if there are no running pods, project can't be idled
 	if len(scalablePods) == 0 {
-		glog.V(2).Infof("Auto-idler: No scalable pods in project( %s ), exiting...", namespace)
-		return nil
+		glog.V(2).Infof("Auto-idler: No scalable pods in project( %s )", namespace)
+		return scalable, nil
 	}
 
-	for _, podObj := range projectPods {
-		pod := podObj.(*cache.ResourceObject)
-		if _, ok := pod.Labels[buildapi.BuildAnnotation]; ok {
-			if pod.IsStarted() {
-				glog.V(2).Infof("Auto-idler: Ignoring project( %s ), builder pod( %s ) found in project.", namespace, pod.Name)
-				return nil
-			}
-		}
-		if time.Since(pod.RunningTimes[0].Start) < idler.config.IdleQueryPeriod {
-			glog.V(2).Infof("Auto-idler: Ignoring project( %s ), either pod( %s )or controller hasn't been running for complete idling cycle.", namespace, pod.Name)
-			return nil
-		}
-	}
-	tags := make(map[string]string)
-	var filters []metrics.Modifier
-	tags["descriptor_name"] = "network/rx"
-	tags["type"] = "pod"
-
-	p := idler.getMetricsParams(namespace)
-
-	period := -1 * idler.config.IdleQueryPeriod
-	endtime := time.Now()
-	starttime := endtime.Add(period)
-	threshold := idler.config.Threshold
-	filters = append(filters, metrics.Filters(metrics.TagsFilter(tags), metrics.BucketsFilter(1), metrics.StartTimeFilter(starttime), metrics.EndTimeFilter(endtime), metrics.StackedFilter()))
-
-	c, err := metrics.NewHawkularClient(p)
-	if err != nil {
-		return err
-	}
-	bp, err := c.ReadBuckets(metrics.Counter, filters...)
-	if err != nil {
-		return err
-	}
-
-	for _, value := range bp {
-		activity := value.Max - value.Min
-		glog.V(2).Infof("Auto-idler: Project( %s )NETWORK_ACTIVITY(bytes): %v", namespace, int(activity))
-
-		if int(activity) < threshold {
-			glog.V(3).Infof("Auto-idler: Project( %s )MaxNetworkRX: %#v", namespace, value.Max)
-			glog.V(3).Infof("Auto-idler: Project( %s )MinNetworkRX: %#v", namespace, value.Min)
-			if !idler.config.IdleDryRun {
-				glog.V(2).Infof("Auto-idler: Project( %s )activity below idling threshold, idling....", namespace)
-				err := idler.autoIdleProjectServices(namespace)
-				if err != nil {
-					return err
-				}
-			} else {
-				glog.V(2).Infof("Auto-idler: Project( %s )network activity below idling threshold, but currently in DryRun mode.", namespace)
-			}
-		} else {
-			glog.V(3).Infof("Auto-idler: Project( %s )MaxNetworkRX: %#v", namespace, value.Max)
-			glog.V(3).Infof("Auto-idler: Project( %s )MinNetworkRX: %#v", namespace, value.Min)
-			glog.V(2).Infof("Auto-idler: Project( %s )network activity is above idling threshold.", namespace)
-		}
-	}
-	return nil
+	scalable = true
+	return scalable, nil
 }
 
-// getMetricsParams initializes Hawkular Parameters.
-func (idler *Idler) getMetricsParams(namespace string) metrics.Parameters {
-	p := metrics.Parameters{
-		Tenant: namespace,
-		Url:    idler.config.Url,
-		Token:  idler.config.Token,
-	}
-
-	// Authentication parameters
-	tC := &tls.Config{}
-	if idler.config.InCluster && !idler.config.HawkularInsecure {
-		caCert := []byte(idler.config.CA)
-
-		caCertPool := x509.NewCertPool()
-		caCertPool.AppendCertsFromPEM(caCert)
-
-		tC.RootCAs = caCertPool
-	} else {
-		if idler.config.CA == "" {
-			tC.InsecureSkipVerify = true
-		}
-	}
-
-	if idler.config.HawkularInsecure {
-		tC.InsecureSkipVerify = true
-	}
-
-	p.TLSConfig = tC
-
-	glog.V(2).Infof("Auto-idler: Initialised Hawkular for project( %s )", namespace)
-	return p
-}
-
-// CheckIdledState returns true if project is idled, false if project is not currently idled
+// checkIdledState returns true if project is idled, false if project is not currently idled
 // This function checks pod count and endpoint annotations.  This is not 100% fail-proof, bc
 // oc idle code itself has limitations.
-func CheckIdledState(c *cache.Cache, namespace string, IsAsleep bool) (bool, error) {
+func checkIdledState(c *cache.Cache, namespace string, IsAsleep bool) (bool, error) {
 	idled := false
-	svcs, err := c.GetProjectServices(namespace)
-	if err != nil {
-		return idled, err
-	}
-	var runningPods []interface{}
-	projPods, err := c.GetProjectPods(namespace)
-	if err != nil {
-		return idled, err
-	}
-	for _, p := range projPods {
-		if p.(*cache.ResourceObject).IsStarted() {
-			runningPods = append(runningPods, p)
-		}
-	}
-	var scalablePods []interface{}
-	for _, svc := range svcs {
-		// Only consider pods with services for idling.
-		podsWService := c.GetPodsForService(svc.(*cache.ResourceObject), runningPods)
-		for _, pod := range podsWService {
-			scalablePods = append(scalablePods, pod)
-		}
-	}
-	// if there are any running pods, project is not idled
-	if len(scalablePods) != 0 {
-		idled = false
-		return idled, nil
-	}
-
 	// TODO: Remove any idling annotations from pods with endpoints in the project
 	// Currently, if there are 2 services in a project that share an RC, it's
 	// possible for stale idling annotations to be left in an unidled project
@@ -363,7 +302,7 @@ func CheckIdledState(c *cache.Cache, namespace string, IsAsleep bool) (bool, err
 	return idled, nil
 }
 
-// The goal with this is to re-create `oc idle` to the extent we need to, in order to provide automatic re-scaling on project wake
+// autoIdleProjectServices re-creates `oc idle`
 // `oc idle` links controllers to endpoints by:
 //   1. taking in an endpoint (service name)
 //   2. getting the pods on that endpoint
