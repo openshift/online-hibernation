@@ -2,10 +2,8 @@ package main
 
 import (
 	"flag"
-	"io/ioutil"
 	"log"
 	"os"
-	"path/filepath"
 	"strings"
 	"time"
 
@@ -15,24 +13,21 @@ import (
 	_ "github.com/openshift/origin/pkg/api/install"
 	osclient "github.com/openshift/origin/pkg/client"
 	"github.com/openshift/origin/pkg/cmd/util/clientcmd"
+	"github.com/prometheus/client_golang/api/prometheus"
 
 	"github.com/golang/glog"
 	"github.com/spf13/pflag"
 	"k8s.io/kubernetes/pkg/api/resource"
+	"k8s.io/kubernetes/pkg/client/restclient"
 	kclient "k8s.io/kubernetes/pkg/client/unversioned"
-)
-
-const (
-	SATokenFile = "/var/run/secrets/kubernetes.io/serviceaccount/token"
-	HawkularCA  = "/var/run/hawkular/ca.crt"
 )
 
 func main() {
 	log.SetOutput(os.Stdout)
 	var quota, period, sleepSyncPeriod, idleSyncPeriod, idleQueryPeriod, projectSleepPeriod time.Duration
 	var workers, threshold int
-	var cfgFile, excludeNamespaces, termQuota, nontermQuota, hawkularURL, metricsBindAddr string
-	var hawkularInsecure, idleDryRun, sleepDryRun, inCluster, collectRuntime, collectCache bool
+	var cfgFile, excludeNamespaces, termQuota, nontermQuota, prometheusURL, metricsBindAddr string
+	var idleDryRun, sleepDryRun, collectRuntime, collectCache bool
 
 	flag.DurationVar(&quota, "quota", 16*time.Hour, "Maximum quota-hours allowed in period before force sleep")
 	flag.DurationVar(&period, "period", 24*time.Hour, "Length of period in hours for quota consumption")
@@ -50,15 +45,13 @@ func main() {
 	flag.StringVar(&metricsBindAddr, "metricsBindAddr", ":8080", "The address on localhost serving metrics - http://localhost:port/metrics")
 	flag.BoolVar(&collectRuntime, "collectRuntime", true, "Enable runtime metrics")
 	flag.BoolVar(&collectCache, "collectCache", true, "Enable cache metrics")
-	flag.StringVar(&hawkularURL, "hawkular-url", "https://hawkular-metrics.openshift-infra.svc.cluster.local", "Hawkular url")
-	flag.BoolVar(&hawkularInsecure, "insecure", true, "Use tls insecure-skip-verify to access Hawkular.")
+	flag.StringVar(&prometheusURL, "prometheus-url", "https://prometheus.prometheus.svc.cluster.local", "Prometheus url")
 
 	flag.DurationVar(&idleSyncPeriod, "idle-sync-period", 10*time.Minute, "Interval to sync project idle status")
 	flag.DurationVar(&idleQueryPeriod, "idle-query-period", 30*time.Minute, "Period to compare network activity")
 	flag.IntVar(&threshold, "idle-threshold", 5000, "Minimun network traffic received (bytes) to avoid auto-idling")
 	flag.BoolVar(&idleDryRun, "idle-dry-run", true, "Log which projects will be auto-idled but do not idle them.")
 
-	flag.BoolVar(&inCluster, "in-cluster", true, "If incluster, CA and token will be gathered from within pod.")
 	flag.Parse()
 
 	tQuota, err := resource.ParseQuantity(termQuota)
@@ -72,25 +65,45 @@ func main() {
 		os.Exit(1)
 	}
 
-	//Set up kubernetes and openshift clients
+	//Set up clients
 	var kubeClient kclient.Interface
 	var osClient osclient.Interface
+	var prometheusClient prometheus.Client
 
 	config, err := clientcmd.DefaultClientConfig(pflag.NewFlagSet("empty", pflag.ContinueOnError)).ClientConfig()
 	if err != nil {
-		glog.V(0).Infof("Error creating cluster config: %s", err)
-		os.Exit(1)
+		glog.Fatalf("Error creating cluster config: %s", err)
 	}
 	osClient, err = osclient.New(config)
 	if err != nil {
-		glog.V(0).Infof("Error creating OpenShift client: %s", err)
-		os.Exit(2)
+		glog.Fatalf("Error creating OpenShift client: %s", err)
 	}
 	kubeClient, err = kclient.New(config)
 	if err != nil {
-		glog.V(0).Infof("Error creating Kubernetes client: %s", err)
-		os.Exit(1)
+		glog.Fatalf("Error creating Kubernetes client: %s", err)
 	}
+
+	// @DirectXMan12 should be credited here for helping with the promCfg
+	// Steal the transport from the client config -- it should have the right
+	// certs, token, auth info, etc for connecting to the Prometheus OAuth proxy
+	promClientConfig := *config
+	promClientConfig.CAFile = "/var/run/secrets/kubernetes.io/serviceaccount/service-ca.crt"
+	transport, err := restclient.TransportFor(&promClientConfig)
+	if err != nil {
+		glog.Fatalf("Error creating cluster config: %s", err)
+	}
+
+	promCfg := prometheus.Config{
+		Address: prometheusURL,
+		// TODO: technically dubious
+		Transport: transport.(prometheus.CancelableTransport),
+	}
+
+	prometheusClient, err = prometheus.New(promCfg)
+	if err != nil {
+		glog.Fatalf("Error creating Prometheus client: %s", err)
+	}
+
 	factory := clientcmd.New(pflag.NewFlagSet("empty", pflag.ContinueOnError))
 
 	namespaces := strings.Split(excludeNamespaces, ",")
@@ -125,6 +138,7 @@ func main() {
 			CollectRuntime: collectRuntime,
 			CollectCache:   collectCache,
 		}
+
 		server := forcesleep.MetricsServer{
 			Config:     metricsConfig,
 			Controller: sleeper,
@@ -137,55 +151,18 @@ func main() {
 
 	sleeper.Run(c)
 
-	cacrt := ""
-	token := ""
-
-	if inCluster {
-		token = mustReadFile(SATokenFile)
-		if !hawkularInsecure {
-			cacrt = mustReadFile(HawkularCA)
-		}
-	} else {
-		// If running outside of a cluster, this will have to be manually entered
-		token = ""
-	}
-
 	idlerConfig := &idling.IdlerConfig{
 		Exclude:            exclude,
-		Url:                hawkularURL,
+		PrometheusClient:   prometheusClient,
 		IdleSyncPeriod:     idleSyncPeriod,
 		IdleQueryPeriod:    idleQueryPeriod,
-		CA:                 cacrt,
-		Token:              token,
 		SyncWorkers:        workers,
-		HawkularInsecure:   hawkularInsecure,
 		Threshold:          threshold,
 		IdleDryRun:         idleDryRun,
-		InCluster:          inCluster,
 		ProjectSleepPeriod: projectSleepPeriod,
 	}
 
 	idler := idling.NewIdler(idlerConfig, factory, cache)
 	idler.Run(c)
 	<-c
-}
-
-// MustReadFile reads the contents of file into a string or fatally exits on
-// error.
-func mustReadFile(file string) string {
-	if len(file) == 0 {
-		glog.Fatalf("no filename specified")
-	}
-
-	path, err := filepath.Abs(file)
-	if err != nil {
-		glog.Fatalf("error reading %q: %s", path, err)
-	}
-
-	bytes, err := ioutil.ReadFile(path)
-	if err != nil {
-		glog.Fatalf("error reading %q for file %s: %s", path, file, err)
-	}
-
-	return strings.TrimSpace(string(bytes))
 }
