@@ -11,9 +11,7 @@ import (
 	"github.com/prometheus/common/model"
 
 	buildapi "github.com/openshift/origin/pkg/build/api"
-	unidlingapi "github.com/openshift/origin/pkg/unidling/api"
 	"golang.org/x/net/context"
-	kapi "k8s.io/kubernetes/pkg/api"
 	"k8s.io/kubernetes/pkg/util/wait"
 	"k8s.io/kubernetes/pkg/util/workqueue"
 )
@@ -30,6 +28,21 @@ type IdlerConfig struct {
 	SyncWorkers        int
 	IdleDryRun         bool
 	ProjectSleepPeriod time.Duration
+}
+
+// PrometheusMetrics holds map of prometheus metrics
+// consisting of network activity for a project over the
+// IdleQueryPeriod.
+type PrometheusMetrics struct {
+	netmap map[string]float64
+}
+
+// NewPrometheusMetrics returns a PrometheusMetrics object
+func NewPrometheusMetrics(ic *IdlerConfig) *PrometheusMetrics {
+	pm := &PrometheusMetrics{
+		netmap: GetNetworkActivity(ic),
+	}
+	return pm
 }
 
 // Idler is the auto-idler object
@@ -52,17 +65,31 @@ func NewIdler(ic *IdlerConfig, f *clientcmd.Factory, c *cache.Cache) *Idler {
 	return ctrl
 }
 
-// getNetworkActivity queries prometheus to get a sum of network activity received
+// Run starts the idler controller and keeps it going until
+// the given channel is closed.
+func (idler *Idler) Run(stopChan <-chan struct{}) {
+	idler.stopChannel = stopChan
+	go wait.Until(idler.getMetricsAndSync, idler.config.IdleSyncPeriod, stopChan)
+	for i := 1; i <= idler.config.SyncWorkers; i++ {
+		go wait.Until(idler.startWorker(), time.Second, stopChan)
+	}
+	<-stopChan
+	glog.V(2).Infof("Auto-idler: Shutting down controller")
+	idler.queue.ShutDown()
+}
+
+// GetNetworkActivity queries prometheus to get a sum of network activity received
 // over the IdleQueryPeriod for all pods, separated by namespace.  Only results with
 // network activity below the idler threshold are returned.  This function returns
 // a map of namespace:networkActivity (bytes).
-func (idler *Idler) getNetworkActivity() (map[string]float64, error) {
-	queryAPI := prometheus.NewQueryAPI(idler.config.PrometheusClient)
+func GetNetworkActivity(idlerconfig *IdlerConfig) map[string]float64 {
+	glog.V(2).Infof("Auto-idler: Querying prometheus to get  network activity for projects")
+	queryAPI := prometheus.NewQueryAPI(idlerconfig.PrometheusClient)
 	// ic.Threshold can only be set via command line flags
-	query_string := fmt.Sprintf(`sum(delta(container_network_receive_bytes_total{namespace!=""}[%s])) by (namespace) < %v`, model.Duration(idler.config.IdleQueryPeriod).String(), idler.config.Threshold)
+	query_string := fmt.Sprintf(`sum(delta(container_network_receive_bytes_total{namespace!=""}[%s])) by (namespace) < %v`, model.Duration(idlerconfig.IdleQueryPeriod).String(), idlerconfig.Threshold)
 	result, err := queryAPI.Query(context.TODO(), query_string, time.Now())
 	if err != nil {
-		return nil, err
+		glog.Errorf("Auto-idler: %s", err)
 	}
 	var namespace string
 	netmap := make(map[string]float64)
@@ -75,36 +102,18 @@ func (idler *Idler) getNetworkActivity() (map[string]float64, error) {
 		}
 		netmap[namespace] = float64(val)
 	}
-	return netmap, nil
-}
-
-// Run starts the idler controller and keeps it going until
-// the given channel is closed.
-func (idler *Idler) Run(stopChan <-chan struct{}) {
-	idler.stopChannel = stopChan
-	// Spawn a goroutine to run project sync
-	go wait.Until(idler.sync, idler.config.IdleSyncPeriod, stopChan)
-	for i := 1; i <= idler.config.SyncWorkers; i++ {
-		go wait.Until(idler.startWorker(), time.Second, stopChan)
-	}
-	<-stopChan
-	glog.V(2).Infof("Auto-idler: Shutting down controller")
-	idler.queue.ShutDown()
+	glog.V(2).Infof("Auto-idler: Prometheus query complete")
+	return netmap
 }
 
 // sync matches projects that should be idled and adds them to the workqueue.
-// If a project has scalable resources, is not in 
-// the exclude_namespace list, is in the map of projects below the idling 
-// threshold and if the idler is not in DryRun mode, then that project name is 
+// If a project has scalable resources, is not in
+// the exclude_namespace list, is in the map of projects below the idling
+// threshold and if the idler is not in DryRun mode, then that project name is
 // added to the queue of projects to be idled.
-func (idler *Idler) sync() {
+func (idler *Idler) sync(prometheus *PrometheusMetrics) {
 	glog.V(1).Infof("Auto-idler: Running project sync")
 	projects, err := idler.resources.Indexer.ByIndex("ofKind", cache.ProjectKind)
-	if err != nil {
-		glog.Errorf("Auto-idler: %s", err)
-		return
-	}
-	netmap, err := idler.getNetworkActivity()
 	if err != nil {
 		glog.Errorf("Auto-idler: %s", err)
 		return
@@ -116,14 +125,12 @@ func (idler *Idler) sync() {
 			glog.Errorf("Auto-idler: %s", err)
 		}
 		if !scalable {
-			// Run checkIdledState here to gather information for logs
-			_, _ = checkIdledState(idler.resources, ns, namespace.(*cache.ResourceObject).IsAsleep)
 			glog.V(2).Infof("Auto-idler: Project( %s )sync complete", ns)
 			continue
 		}
 		if !idler.config.Exclude[ns] {
 			nsInMap := false
-			if bytes, ok := netmap[ns]; ok {
+			if bytes, ok := prometheus.netmap[ns]; ok {
 				nsInMap = true
 				if idler.config.IdleDryRun {
 					glog.V(2).Infof("Auto-idler: Project( %s )netrx bytes( %v )below idling threshold, but currently in DryRun mode", ns, bytes)
@@ -139,6 +146,11 @@ func (idler *Idler) sync() {
 			}
 		}
 	}
+}
+
+func (idler *Idler) getMetricsAndSync() {
+	prometheus := NewPrometheusMetrics(idler.config)
+	idler.sync(prometheus)
 }
 
 // startWorker gets items from the queue hands them to syncProject
@@ -174,7 +186,7 @@ func (idler *Idler) startWorker() func() {
 	}
 }
 
-// syncProject gets project from the cache, does a final check for 
+// syncProject gets project from the cache, does a final check for
 // IsAsleep and IsIdled and then calls autoIdleProjectServices.
 func (idler *Idler) syncProject(namespace string) error {
 	project, err := idler.resources.GetProject(namespace)
@@ -183,20 +195,6 @@ func (idler *Idler) syncProject(namespace string) error {
 	}
 	if project.IsAsleep {
 		glog.V(2).Infof("Auto-idler: Ignoring project( %s ), currently in force-sleep", namespace)
-		return nil
-	}
-	// Only way this could be idled here is if user was manually idling project at same
-	// time sync() was running.  Projects with 0 scalable pods would not be added to
-	// the queue.
-	// If true, endpoints in namespace are currently idled,
-	// i.e. endpoints in project have idling annotations and len(scalablePods)==0
-	// Project is not currently idled if there are any running scalable pods in namespace.
-	idled, err := checkIdledState(idler.resources, namespace, project.IsAsleep)
-	if err != nil {
-		return err
-	}
-	if idled {
-		glog.V(2).Infof("Auto-idler: Project( %s )sync complete", namespace)
 		return nil
 	}
 	glog.V(2).Infof("Auto-idler: Syncing project: %s ", project.Name)
@@ -209,7 +207,7 @@ func (idler *Idler) syncProject(namespace string) error {
 	return nil
 }
 
-// checkForScalables returns true if there are scalable resources 
+// checkForScalables returns true if there are scalable resources
 // associated with pods in a namespace
 func (idler *Idler) checkForScalables(namespace string) (bool, error) {
 	scalable := false
@@ -259,47 +257,12 @@ func (idler *Idler) checkForScalables(namespace string) (bool, error) {
 	}
 	// if there are no running pods, project can't be idled
 	if len(scalablePods) == 0 {
-		glog.V(2).Infof("Auto-idler: No scalable pods in project( %s )", namespace)
+		glog.V(2).Infof("Auto-idler: No pods associated with services in project( %s )", namespace)
 		return scalable, nil
 	}
 
 	scalable = true
 	return scalable, nil
-}
-
-// checkIdledState returns true if project is idled, false if project is not currently idled
-// This function checks pod count and endpoint annotations.  This is not 100% fail-proof, bc
-// oc idle code itself has limitations.
-func checkIdledState(c *cache.Cache, namespace string, IsAsleep bool) (bool, error) {
-	idled := false
-	// TODO: Remove any idling annotations from pods with endpoints in the project
-	// Currently, if there are 2 services in a project that share an RC, it's
-	// possible for stale idling annotations to be left in an unidled project
-	// in the endpoints of the service that was not explicitly un-idled, ie if
-	// the project was manually scaled up or if just 1 of the svcs routes were
-	// accessed.  This should be fixed in the oc idle code itself, rather than
-	// in this hibernation controller.  For now, we should document this and
-	// steer users away from setting more than 1 service per RC.
-	endpointInterface := c.KubeClient.Endpoints(namespace)
-	epList, err := endpointInterface.List(kapi.ListOptions{})
-	if err != nil {
-		return idled, err
-	}
-	for _, ep := range epList.Items {
-		_, idledAtExists := ep.ObjectMeta.Annotations[unidlingapi.IdledAtAnnotation]
-		_, targetExists := ep.ObjectMeta.Annotations[unidlingapi.UnidleTargetAnnotation]
-		if targetExists && idledAtExists {
-			idled = true
-			if !IsAsleep {
-				glog.V(2).Infof("Project( %s )in idled state", namespace)
-			}
-			return idled, nil
-		}
-
-	}
-	idled = false
-	glog.V(3).Infof("Project( %s )not currently idled", namespace)
-	return idled, nil
 }
 
 // autoIdleProjectServices re-creates `oc idle`
@@ -348,5 +311,6 @@ func (idler *Idler) autoIdleProjectServices(namespace string) error {
 	if err != nil {
 		return fmt.Errorf("Error adding idled-at annotation in project( %s ): %v", namespace, err)
 	}
+	glog.V(2).Infof("Auto-idler: Project( %s )endpoints are now idled", namespace)
 	return nil
 }

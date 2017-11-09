@@ -1,4 +1,5 @@
 # Old-skool build tools.
+# TODO: clean up this file
 
 .DEFAULT_GOAL := build
 
@@ -30,7 +31,19 @@ build: check-gopath
 test-integration: build
 	go test -v $(TESTFLAGS) \
 		github.com/openshift/online-hibernation/pkg/...
-.PHONY: test-integration
+
+.PHONY: test
+# Runs the unit tests.
+#
+# Args:
+#   TESTFLAGS: Flags to pass to `go test`. The `-v` argument is always passed.
+#
+# Examples:
+#   make test TESTFLAGS="-run TestSomething"
+test: build
+	go test -v $(TESTFLAGS) \
+		github.com/openshift/online-hibernation/pkg/cache/... github.com/openshift/online-hibernation/pkg/idling/...
+.PHONY: test
 
 
 # Build a release image. The resulting image can be used with test-release.
