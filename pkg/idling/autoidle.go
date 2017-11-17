@@ -30,63 +30,33 @@ type IdlerConfig struct {
 	ProjectSleepPeriod time.Duration
 }
 
-// PrometheusMetrics holds map of prometheus metrics
-// consisting of network activity for a project over the
-// IdleQueryPeriod.
+// PrometheusMetricsInterface holds method for querying
+// prometheus.
+type PrometheusMetricsInterface interface {
+	GetNetworkActivity() map[string]float64
+}
+
 type PrometheusMetrics struct {
-	netmap map[string]float64
+	config *IdlerConfig
 }
 
 // NewPrometheusMetrics returns a PrometheusMetrics object
 func NewPrometheusMetrics(ic *IdlerConfig) *PrometheusMetrics {
 	pm := &PrometheusMetrics{
-		netmap: GetNetworkActivity(ic),
+		config: ic,
 	}
 	return pm
-}
-
-// Idler is the auto-idler object
-type Idler struct {
-	factory     *clientcmd.Factory
-	config      *IdlerConfig
-	resources   *cache.Cache
-	queue       workqueue.RateLimitingInterface
-	stopChannel <-chan struct{}
-}
-
-// NewIdler returns an Idler object
-func NewIdler(ic *IdlerConfig, f *clientcmd.Factory, c *cache.Cache) *Idler {
-	ctrl := &Idler{
-		config:    ic,
-		factory:   f,
-		resources: c,
-		queue:     workqueue.NewNamedRateLimitingQueue(workqueue.DefaultControllerRateLimiter(), "auto-idler"),
-	}
-	return ctrl
-}
-
-// Run starts the idler controller and keeps it going until
-// the given channel is closed.
-func (idler *Idler) Run(stopChan <-chan struct{}) {
-	idler.stopChannel = stopChan
-	go wait.Until(idler.getMetricsAndSync, idler.config.IdleSyncPeriod, stopChan)
-	for i := 1; i <= idler.config.SyncWorkers; i++ {
-		go wait.Until(idler.startWorker(), time.Second, stopChan)
-	}
-	<-stopChan
-	glog.V(2).Infof("Auto-idler: Shutting down controller")
-	idler.queue.ShutDown()
 }
 
 // GetNetworkActivity queries prometheus to get a sum of network activity received
 // over the IdleQueryPeriod for all pods, separated by namespace.  Only results with
 // network activity below the idler threshold are returned.  This function returns
 // a map of namespace:networkActivity (bytes).
-func GetNetworkActivity(idlerconfig *IdlerConfig) map[string]float64 {
+func (pm *PrometheusMetrics) GetNetworkActivity() map[string]float64 {
 	glog.V(2).Infof("Auto-idler: Querying prometheus to get  network activity for projects")
-	queryAPI := prometheus.NewQueryAPI(idlerconfig.PrometheusClient)
+	queryAPI := prometheus.NewQueryAPI(pm.config.PrometheusClient)
 	// ic.Threshold can only be set via command line flags
-	query_string := fmt.Sprintf(`sum(delta(container_network_receive_bytes_total{namespace!=""}[%s])) by (namespace) < %v`, model.Duration(idlerconfig.IdleQueryPeriod).String(), idlerconfig.Threshold)
+	query_string := fmt.Sprintf(`sum(delta(container_network_receive_bytes_total{namespace!=""}[%s])) by (namespace) < %v`, model.Duration(pm.config.IdleQueryPeriod).String(), pm.config.Threshold)
 	result, err := queryAPI.Query(context.TODO(), query_string, time.Now())
 	if err != nil {
 		glog.Errorf("Auto-idler: %s", err)
@@ -106,18 +76,54 @@ func GetNetworkActivity(idlerconfig *IdlerConfig) map[string]float64 {
 	return netmap
 }
 
+// Idler is the auto-idler object
+type Idler struct {
+	factory           *clientcmd.Factory
+	config            *IdlerConfig
+	resources         *cache.Cache
+	queue             workqueue.RateLimitingInterface
+	prometheusMetrics PrometheusMetricsInterface
+	stopChannel       <-chan struct{}
+}
+
+// NewIdler returns an Idler object
+func NewIdler(ic *IdlerConfig, f *clientcmd.Factory, c *cache.Cache, pm PrometheusMetricsInterface) *Idler {
+	ctrl := &Idler{
+		config:            ic,
+		factory:           f,
+		resources:         c,
+		queue:             workqueue.NewNamedRateLimitingQueue(workqueue.DefaultControllerRateLimiter(), "auto-idler"),
+		prometheusMetrics: pm,
+	}
+	return ctrl
+}
+
+// Run starts the idler controller and keeps it going until
+// the given channel is closed.
+func (idler *Idler) Run(stopChan <-chan struct{}) {
+	idler.stopChannel = stopChan
+	go wait.Until(idler.sync, idler.config.IdleSyncPeriod, stopChan)
+	for i := 1; i <= idler.config.SyncWorkers; i++ {
+		go wait.Until(idler.startWorker(), time.Second, stopChan)
+	}
+	<-stopChan
+	glog.V(2).Infof("Auto-idler: Shutting down controller")
+	idler.queue.ShutDown()
+}
+
 // sync matches projects that should be idled and adds them to the workqueue.
 // If a project has scalable resources, is not in
 // the exclude_namespace list, is in the map of projects below the idling
 // threshold and if the idler is not in DryRun mode, then that project name is
 // added to the queue of projects to be idled.
-func (idler *Idler) sync(prometheus *PrometheusMetrics) {
+func (idler *Idler) sync() {
 	glog.V(1).Infof("Auto-idler: Running project sync")
 	projects, err := idler.resources.Indexer.ByIndex("ofKind", cache.ProjectKind)
 	if err != nil {
 		glog.Errorf("Auto-idler: %s", err)
 		return
 	}
+	netmap := idler.prometheusMetrics.GetNetworkActivity()
 	for _, namespace := range projects {
 		ns := namespace.(*cache.ResourceObject).Name
 		scalable, err := idler.checkForScalables(ns)
@@ -130,7 +136,7 @@ func (idler *Idler) sync(prometheus *PrometheusMetrics) {
 		}
 		if !idler.config.Exclude[ns] {
 			nsInMap := false
-			if bytes, ok := prometheus.netmap[ns]; ok {
+			if bytes, ok := netmap[ns]; ok {
 				nsInMap = true
 				if idler.config.IdleDryRun {
 					glog.V(2).Infof("Auto-idler: Project( %s )netrx bytes( %v )below idling threshold, but currently in DryRun mode", ns, bytes)
@@ -146,11 +152,6 @@ func (idler *Idler) sync(prometheus *PrometheusMetrics) {
 			}
 		}
 	}
-}
-
-func (idler *Idler) getMetricsAndSync() {
-	prometheus := NewPrometheusMetrics(idler.config)
-	idler.sync(prometheus)
 }
 
 // startWorker gets items from the queue hands them to syncProject

@@ -333,14 +333,14 @@ func TestSync(t *testing.T) {
 		})
 
 		fakeCache := cache.NewCache(fakeOClient, fakeClient, factory, exclude)
-		idler := NewIdler(config, factory, fakeCache)
+		idler := NewIdler(config, factory, fakeCache, prometheus)
 		for _, resource := range test.resources {
 			err := idler.resources.Indexer.AddResourceObject(resource)
 			if err != nil {
 				t.Logf("Error: %s", err)
 			}
 		}
-		idler.sync(prometheus)
+		idler.sync()
 		assert.Equal(t, idler.queue.Len(), test.items_in_queue, "expected items did not match actual items in workqueue")
 		if idler.queue.Len() == 1 {
 			ns, _ := idler.queue.Get()
@@ -352,11 +352,19 @@ func TestSync(t *testing.T) {
 	}
 }
 
+type FakePrometheusMetrics struct {
+	netmap map[string]float64
+}
+
 func fakePrometheusMetrics(netmap map[string]float64) *PrometheusMetrics {
-	prometheus := &PrometheusMetrics{
+	prometheus := &FakePrometheusMetrics{
 		netmap,
 	}
 	return prometheus
+}
+
+func (pm *FakePrometheusMetrics) GetNetworkActivity() map[string]float64 {
+	return pm.netmap
 }
 
 func pod(name, namespace string, labels map[string]string) *kapi.Pod {
