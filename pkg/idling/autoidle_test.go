@@ -21,6 +21,7 @@ import (
 	ktestclient "k8s.io/kubernetes/pkg/client/unversioned/testclient"
 	"k8s.io/kubernetes/pkg/runtime"
 	"k8s.io/kubernetes/pkg/types"
+	"k8s.io/kubernetes/pkg/util/workqueue"
 )
 
 func init() {
@@ -28,8 +29,7 @@ func init() {
 }
 
 func TestSync(t *testing.T) {
-	tests := []struct {
-		name                   string
+	tests := map[string]struct {
 		idleDryRun             bool
 		exclude                map[string]bool
 		netmap                 map[string]float64
@@ -38,29 +38,28 @@ func TestSync(t *testing.T) {
 		services               []*kapi.Service
 		replicationControllers []*kapi.ReplicationController
 		resources              []*cache.ResourceObject
-		items_in_queue         int
-		queue_key              string
+		expectedQueueLen       int
+		expectedQueueKeys      []string
 	}{
-		{
-			name:       "Item is added to queue",
+		"Single item added to queue": {
 			idleDryRun: false,
-			netmap:     map[string]float64{"somens2": 1000, "somens1": 1000},
-			exclude:    map[string]bool{"somens1": true},
+			netmap:     map[string]float64{"somens1": 1000, "somens2": 1000},
+			exclude:    map[string]bool{"foo": true},
 			pods: []*kapi.Pod{
-				pod("somepod1", "somens1", map[string]string{"app": "anapp", "deploymentconfig": "apoddc"}),
-				pod("somepod2", "somens2", map[string]string{"app": "anotherapp", "deploymentconfig": "anotherpoddc"}),
+				pod("somepod1", "somens1"),
+				pod("somepod2", "somens2"),
 			},
 			services: []*kapi.Service{
-				svc("somesvc1", "somens1", map[string]string{"foo": "bar"}),
-				svc("somesvc2", "somens2", map[string]string{"app": "anotherapp", "deploymentconfig": "anotherpoddc"}),
+				svc("somesvc1", "somens1"),
+				svc("somesvc2", "somens2"),
 			},
 			replicationControllers: []*kapi.ReplicationController{
 				rc("somerc1", "somens1"),
 				rc("somerc2", "somens2"),
 			},
 			deploymentConfigs: []*deployapi.DeploymentConfig{
-				dc("apoddc", "somens1", map[string]string{"app": "anapp"}),
-				dc("anotherpoddc", "somens2", map[string]string{"app": "anotherapp"}),
+				dc("apoddc", "somens1"),
+				dc("anotherpoddc", "somens2"),
 			},
 			resources: []*cache.ResourceObject{
 				projectResource("somens1", false),
@@ -90,25 +89,77 @@ func TestSync(t *testing.T) {
 				svcResource("1234", "somesvc1", "somens1", "1", map[string]string{"foo": "bar"}),
 				svcResource("5678", "somesvc2", "somens2", "2", map[string]string{"app": "anotherapp", "deploymentconfig": "anotherpoddc"}),
 			},
-			items_in_queue: 1,
-			queue_key:      "somens2",
+			expectedQueueLen:  1,
+			expectedQueueKeys: []string{"somens2"},
 		},
-		{
-			name:       "Projects in excluded namespaces are not added to queue",
+
+		"2 items added to queue": {
+			idleDryRun: false,
+			netmap:     map[string]float64{"somens2": 1000, "somens1": 1000},
+			exclude:    map[string]bool{"somens3": true},
+			pods: []*kapi.Pod{
+				pod("somepod1", "somens1"),
+				pod("somepod2", "somens2"),
+			},
+			services: []*kapi.Service{
+				svc("somesvc1", "somens1"),
+				svc("somesvc2", "somens2"),
+			},
+			replicationControllers: []*kapi.ReplicationController{
+				rc("somerc1", "somens1"),
+				rc("somerc2", "somens2"),
+			},
+			deploymentConfigs: []*deployapi.DeploymentConfig{
+				dc("apoddc", "somens1"),
+				dc("anotherpoddc", "somens2"),
+			},
+			resources: []*cache.ResourceObject{
+				projectResource("somens1", false),
+				projectResource("somens2", false),
+				rcResource("somerc1", "somerc1", "somens1", "1", "apoddc", []*cache.RunningTime{
+					runningTime(time.Now().Add(-1*time.Hour),
+						time.Time{}),
+				}),
+				rcResource("somerc2", "somerc2", "somens2", "1", "anotherpoddc", []*cache.RunningTime{
+					runningTime(time.Now().Add(-1*time.Hour),
+						time.Time{}),
+				}),
+				podResource("somepod1", "somepod1", "somens1", "1",
+					resource.MustParse("500M"),
+					[]*cache.RunningTime{
+						runningTime(time.Now().Add(-1*time.Hour),
+							time.Time{}),
+					},
+					map[string]string{"app": "anapp", "deploymentconfig": "apoddc"}),
+				podResource("somepod2", "somepod2", "somens2", "2",
+					resource.MustParse("1G"),
+					[]*cache.RunningTime{
+						runningTime(time.Now().Add(-1*time.Hour),
+							time.Time{}),
+					},
+					map[string]string{"app": "anotherapp", "deploymentconfig": "anotherpoddc"}),
+				svcResource("1234", "somesvc1", "somens1", "1", map[string]string{"app": "anapp", "deploymentconfig": "apoddc"}),
+				svcResource("5678", "somesvc2", "somens2", "2", map[string]string{"app": "anotherapp", "deploymentconfig": "anotherpoddc"}),
+			},
+			expectedQueueLen:  2,
+			expectedQueueKeys: []string{"somens1", "somens2"},
+		},
+
+		"Project in excluded namespaces not added to queue": {
 			idleDryRun: false,
 			netmap:     map[string]float64{"somens2": 1000, "somens1": 1000},
 			exclude:    map[string]bool{"somens2": true},
 			pods: []*kapi.Pod{
-				pod("somepod2", "somens2", map[string]string{"app": "anotherapp", "deploymentconfig": "anotherpoddc"}),
+				pod("somepod2", "somens2"),
 			},
 			services: []*kapi.Service{
-				svc("somesvc2", "somens2", map[string]string{"app": "anotherapp", "deploymentconfig": "anotherpoddc"}),
+				svc("somesvc2", "somens2"),
 			},
 			replicationControllers: []*kapi.ReplicationController{
 				rc("somerc2", "somens2"),
 			},
 			deploymentConfigs: []*deployapi.DeploymentConfig{
-				dc("anotherpoddc", "somens2", map[string]string{"app": "anotherapp"}),
+				dc("anotherpoddc", "somens2"),
 			},
 			resources: []*cache.ResourceObject{
 				projectResource("somens2", false),
@@ -125,81 +176,64 @@ func TestSync(t *testing.T) {
 					map[string]string{"app": "anotherapp", "deploymentconfig": "anotherpoddc"}),
 				svcResource("5678", "somesvc2", "somens2", "2", map[string]string{"app": "anotherapp", "deploymentconfig": "anotherpoddc"}),
 			},
-			items_in_queue: 0,
-			queue_key:      "none",
+			expectedQueueLen:  0,
+			expectedQueueKeys: nil,
 		},
-		{
-			name:       "2 items should be  added to queue",
+
+		"Project with pod runningTime < IdleQueryPeriod not added to queue": {
 			idleDryRun: false,
 			netmap:     map[string]float64{"somens2": 1000, "somens1": 1000},
-			exclude:    map[string]bool{"": true},
+			exclude:    map[string]bool{"foo": true},
 			pods: []*kapi.Pod{
-				pod("somepod1", "somens1", map[string]string{"app": "anapp", "deploymentconfig": "apoddc"}),
-				pod("somepod2", "somens2", map[string]string{"app": "anotherapp", "deploymentconfig": "anotherpoddc"}),
+				pod("somepod2", "somens2"),
 			},
 			services: []*kapi.Service{
-				svc("somesvc1", "somens1", map[string]string{"app": "anapp", "deploymentconfig": "apoddc"}),
-				svc("somesvc2", "somens2", map[string]string{"app": "anotherapp", "deploymentconfig": "anotherpoddc"}),
+				svc("somesvc2", "somens2"),
 			},
 			replicationControllers: []*kapi.ReplicationController{
-				rc("somerc1", "somens1"),
 				rc("somerc2", "somens2"),
 			},
 			deploymentConfigs: []*deployapi.DeploymentConfig{
-				dc("apoddc", "somens1", map[string]string{"app": "anapp"}),
-				dc("anotherpoddc", "somens2", map[string]string{"app": "anotherapp"}),
+				dc("anotherpoddc", "somens2"),
 			},
 			resources: []*cache.ResourceObject{
-				projectResource("somens1", false),
 				projectResource("somens2", false),
-				rcResource("somerc1", "somerc1", "somens1", "1", "apoddc", []*cache.RunningTime{
-					runningTime(time.Now().Add(-1*time.Hour),
-						time.Time{}),
-				}),
 				rcResource("somerc2", "somerc2", "somens2", "1", "anotherpoddc", []*cache.RunningTime{
 					runningTime(time.Now().Add(-1*time.Hour),
 						time.Time{}),
 				}),
-				podResource("somepod1", "somepod1", "somens1", "1",
-					resource.MustParse("500M"),
-					[]*cache.RunningTime{
-						runningTime(time.Now().Add(-1*time.Hour),
-							time.Time{}),
-					},
-					map[string]string{"app": "anapp", "deploymentconfig": "apoddc"}),
 				podResource("somepod2", "somepod2", "somens2", "2",
 					resource.MustParse("1G"),
 					[]*cache.RunningTime{
-						runningTime(time.Now().Add(-1*time.Hour),
+						runningTime(time.Now().Add(-1*time.Minute),
 							time.Time{}),
 					},
 					map[string]string{"app": "anotherapp", "deploymentconfig": "anotherpoddc"}),
-				svcResource("1234", "somesvc1", "somens1", "1", map[string]string{"app": "anapp", "deploymentconfig": "apoddc"}),
 				svcResource("5678", "somesvc2", "somens2", "2", map[string]string{"app": "anotherapp", "deploymentconfig": "anotherpoddc"}),
 			},
-			items_in_queue: 2,
-			queue_key:      "somens1",
+			expectedQueueLen:  0,
+			expectedQueueKeys: nil,
 		},
-		{
-			name:       "2 items are scalable, but in IdleDryRun, queue should have 0 items",
+
+		"2 items are scalable, but in IdleDryRun, no projects added to queue": {
 			idleDryRun: true,
 			netmap:     map[string]float64{"somens2": 1000, "somens1": 1000},
-			exclude:    map[string]bool{"": true},
+			exclude:    map[string]bool{"somens3": true},
 			pods: []*kapi.Pod{
-				pod("somepod1", "somens1", map[string]string{"app": "anapp", "deploymentconfig": "apoddc"}),
-				pod("somepod2", "somens2", map[string]string{"app": "anotherapp", "deploymentconfig": "anotherpoddc"}),
+				pod("somepod1", "somens1"),
+				pod("somepod2", "somens2"),
 			},
 			services: []*kapi.Service{
-				svc("somesvc1", "somens1", map[string]string{"app": "anapp", "deploymentconfig": "apoddc"}),
-				svc("somesvc2", "somens2", map[string]string{"app": "anotherapp", "deploymentconfig": "anotherpoddc"}),
+				svc("somesvc1", "somens1"),
+				svc("somesvc2", "somens2"),
 			},
 			replicationControllers: []*kapi.ReplicationController{
 				rc("somerc1", "somens1"),
 				rc("somerc2", "somens2"),
 			},
 			deploymentConfigs: []*deployapi.DeploymentConfig{
-				dc("apoddc", "somens1", map[string]string{"app": "anapp"}),
-				dc("anotherpoddc", "somens2", map[string]string{"app": "anotherapp"}),
+				dc("apoddc", "somens1"),
+				dc("anotherpoddc", "somens2"),
 			},
 			resources: []*cache.ResourceObject{
 				projectResource("somens1", false),
@@ -229,29 +263,29 @@ func TestSync(t *testing.T) {
 				svcResource("1234", "somesvc1", "somens1", "1", map[string]string{"app": "anapp", "deploymentconfig": "apoddc"}),
 				svcResource("5678", "somesvc2", "somens2", "2", map[string]string{"app": "anotherapp", "deploymentconfig": "anotherpoddc"}),
 			},
-			items_in_queue: 0,
-			queue_key:      "none",
+			expectedQueueLen:  0,
+			expectedQueueKeys: nil,
 		},
-		{
-			name:       "No scalable resources in projects, queue should have 0 items",
+
+		"No scalable resources in projects, no project added to queue": {
 			idleDryRun: false,
 			netmap:     map[string]float64{"somens2": 1000, "somens1": 1000},
-			exclude:    map[string]bool{"": true},
+			exclude:    map[string]bool{"somens4": true},
 			pods: []*kapi.Pod{
-				pod("somepod1", "somens1", map[string]string{"foo": "bar"}),
-				pod("somepod2", "somens2", map[string]string{"cheese": "sandwich"}),
+				pod("somepod1", "somens1"),
+				pod("somepod2", "somens2"),
 			},
 			services: []*kapi.Service{
-				svc("somesvc1", "somens1", map[string]string{"app": "anapp", "deploymentconfig": "apoddc"}),
-				svc("somesvc2", "somens2", map[string]string{"app": "anotherapp", "deploymentconfig": "anotherpoddc"}),
+				svc("somesvc1", "somens1"),
+				svc("somesvc2", "somens2"),
 			},
 			replicationControllers: []*kapi.ReplicationController{
 				rc("somerc1", "somens1"),
 				rc("somerc2", "somens2"),
 			},
 			deploymentConfigs: []*deployapi.DeploymentConfig{
-				dc("apoddc", "somens1", map[string]string{"app": "anapp"}),
-				dc("anotherpoddc", "somens2", map[string]string{"app": "anotherapp"}),
+				dc("apoddc", "somens1"),
+				dc("anotherpoddc", "somens2"),
 			},
 			resources: []*cache.ResourceObject{
 				projectResource("somens1", false),
@@ -281,19 +315,19 @@ func TestSync(t *testing.T) {
 				svcResource("1234", "somesvc1", "somens1", "1", map[string]string{"app": "anapp", "deploymentconfig": "apoddc"}),
 				svcResource("5678", "somesvc2", "somens2", "2", map[string]string{"app": "anotherapp", "deploymentconfig": "anotherpoddc"}),
 			},
-			items_in_queue: 0,
-			queue_key:      "none",
+			expectedQueueLen:  0,
+			expectedQueueKeys: nil,
 		},
 	}
-	for _, test := range tests {
-		t.Logf("Testing: %s", test.name)
-		prometheus := fakePrometheusMetrics(test.netmap)
+
+	for name, test := range tests {
+		t.Logf("Testing: %s", name)
 		factory := clientcmd.New(pflag.NewFlagSet("empty", pflag.ContinueOnError))
 		exclude := test.exclude
 		config := &IdlerConfig{
 			Exclude:         exclude,
-			IdleSyncPeriod:  10 * time.Second,
-			IdleQueryPeriod: 10 * time.Second,
+			IdleSyncPeriod:  10 * time.Minute,
+			IdleQueryPeriod: 10 * time.Minute,
 			Threshold:       2000,
 			SyncWorkers:     2,
 			IdleDryRun:      test.idleDryRun,
@@ -333,41 +367,22 @@ func TestSync(t *testing.T) {
 		})
 
 		fakeCache := cache.NewCache(fakeOClient, fakeClient, factory, exclude)
-		idler := NewIdler(config, factory, fakeCache, prometheus)
+		idler := NewIdler(config, factory, fakeCache)
 		for _, resource := range test.resources {
 			err := idler.resources.Indexer.AddResourceObject(resource)
 			if err != nil {
 				t.Logf("Error: %s", err)
 			}
 		}
-		idler.sync()
-		assert.Equal(t, idler.queue.Len(), test.items_in_queue, "expected items did not match actual items in workqueue")
-		if idler.queue.Len() == 1 {
-			ns, _ := idler.queue.Get()
-			assert.Equal(t, ns.(string), test.queue_key, "unexpected project added to queue")
-			idler.queue.Done(ns)
-		}
-
+		idler.sync(test.netmap)
+		assert.Equal(t, idler.queue.Len(), test.expectedQueueLen, "expected items did not match actual items in workqueue")
+		nsList := examineQueue(idler.queue)
+		assert.Equal(t, nsList, test.expectedQueueKeys, "unexpected project added to queue")
 		idler.queue.ShutDown()
 	}
 }
 
-type FakePrometheusMetrics struct {
-	netmap map[string]float64
-}
-
-func fakePrometheusMetrics(netmap map[string]float64) *PrometheusMetrics {
-	prometheus := &FakePrometheusMetrics{
-		netmap,
-	}
-	return prometheus
-}
-
-func (pm *FakePrometheusMetrics) GetNetworkActivity() map[string]float64 {
-	return pm.netmap
-}
-
-func pod(name, namespace string, labels map[string]string) *kapi.Pod {
+func pod(name, namespace string) *kapi.Pod {
 	return &kapi.Pod{
 		TypeMeta: unversioned.TypeMeta{
 			Kind: "Pod",
@@ -375,7 +390,6 @@ func pod(name, namespace string, labels map[string]string) *kapi.Pod {
 		ObjectMeta: kapi.ObjectMeta{
 			Name:      name,
 			Namespace: namespace,
-			Labels:    labels,
 		},
 	}
 }
@@ -392,7 +406,7 @@ func rc(name, namespace string) *kapi.ReplicationController {
 	}
 }
 
-func svc(name, namespace string, selectors map[string]string) *kapi.Service {
+func svc(name, namespace string) *kapi.Service {
 	return &kapi.Service{
 		TypeMeta: unversioned.TypeMeta{
 			Kind: "Service",
@@ -401,13 +415,10 @@ func svc(name, namespace string, selectors map[string]string) *kapi.Service {
 			Name:      name,
 			Namespace: namespace,
 		},
-		Spec: kapi.ServiceSpec{
-			Selector: selectors,
-		},
 	}
 }
 
-func dc(name, namespace string, labels map[string]string) *deployapi.DeploymentConfig {
+func dc(name, namespace string) *deployapi.DeploymentConfig {
 	return &deployapi.DeploymentConfig{
 		TypeMeta: unversioned.TypeMeta{
 			Kind: "ReplicationController",
@@ -415,7 +426,6 @@ func dc(name, namespace string, labels map[string]string) *deployapi.DeploymentC
 		ObjectMeta: kapi.ObjectMeta{
 			Name:      name,
 			Namespace: namespace,
-			Labels:    labels,
 		},
 	}
 }
@@ -472,4 +482,17 @@ func runningTime(start, end time.Time) *cache.RunningTime {
 		Start: start,
 		End:   end,
 	}
+}
+
+func examineQueue(queue workqueue.RateLimitingInterface) []string {
+	var nsList []string
+	i := queue.Len()
+	for i > 0 {
+		ns, _ := queue.Get()
+		defer queue.Done(ns)
+		nsList = append(nsList, ns.(string))
+		queue.Forget(ns)
+		i -= 1
+	}
+	return nsList
 }

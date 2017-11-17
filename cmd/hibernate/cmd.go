@@ -162,8 +162,7 @@ func main() {
 		ProjectSleepPeriod: projectSleepPeriod,
 	}
 
-	var pm idling.PrometheusMetricsInterface
-	idler := idling.NewIdler(idlerConfig, factory, cache, pm)
+	idler := idling.NewIdler(idlerConfig, factory, cache)
 	idler.Run(c)
 	<-c
 }
