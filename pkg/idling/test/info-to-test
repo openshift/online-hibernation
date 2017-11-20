@@ -1,7 +1,0 @@
-yum install /usr/bin/nc
-oc create -f idling-dc.yaml
-oc create -f idling-svc-route.yaml
-oc get pods -o wide (to get IP)
-nc 10.128.0.whatever 8675
-then type stuff, enter to create network activity
-

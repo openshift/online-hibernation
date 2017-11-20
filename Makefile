@@ -1,6 +1,10 @@
 # Old-skool build tools.
+# TODO: clean up this file
 
-.DEFAULT_GOAL := help
+.DEFAULT_GOAL := build
+
+ARCH?=amd64
+OUT_DIR?=./_output
 
 TAG ?= openshift/online-hibernation
 TARGET ?= prod
@@ -12,8 +16,8 @@ endif
 
 # Builds and installs the hibernation binary.
 build: check-gopath
-	go install \
-		github.com/openshift/online-hibernation/cmd/force-sleep
+	CGO_ENABLED=0 GOARCH=$(ARCH) go build -a \
+		-o $(OUT_DIR)/$(ARCH)/hibernate github.com/openshift/online-hibernation/cmd/hibernate
 .PHONY: build
 
 
@@ -27,7 +31,19 @@ build: check-gopath
 test-integration: build
 	go test -v $(TESTFLAGS) \
 		github.com/openshift/online-hibernation/pkg/...
-.PHONY: test-integration
+
+.PHONY: test
+# Runs the unit tests.
+#
+# Args:
+#   TESTFLAGS: Flags to pass to `go test`. The `-v` argument is always passed.
+#
+# Examples:
+#   make test TESTFLAGS="-run TestSomething"
+test: build
+	go test -v $(TESTFLAGS) \
+		github.com/openshift/online-hibernation/pkg/cache/... github.com/openshift/online-hibernation/pkg/idling/...
+.PHONY: test
 
 
 # Build a release image. The resulting image can be used with test-release.

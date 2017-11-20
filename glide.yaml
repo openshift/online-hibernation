@@ -8,9 +8,6 @@ import:
   vcs:     git
 
 - package: github.com/prometheus/client_golang/prometheus
-  version: 6373fd93345740fc045eab648524bcbb65c3e690
-
-- package: github.com/hawkular/hawkular-client-go
   subpackage:
-  - metrics
-  version: e8f73610df7fbd3d29f9c02749f80b5e231a0be5
+  - api/prometheus
+  version: 6373fd93345740fc045eab648524bcbb65c3e690
