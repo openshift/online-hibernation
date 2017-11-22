@@ -45,7 +45,7 @@ func main() {
 	flag.StringVar(&metricsBindAddr, "metricsBindAddr", ":8080", "The address on localhost serving metrics - http://localhost:port/metrics")
 	flag.BoolVar(&collectRuntime, "collectRuntime", true, "Enable runtime metrics")
 	flag.BoolVar(&collectCache, "collectCache", true, "Enable cache metrics")
-	flag.StringVar(&prometheusURL, "prometheus-url", "https://prometheus.prometheus.svc.cluster.local", "Prometheus url")
+	flag.StringVar(&prometheusURL, "prometheus-url", "https://prometheus.openshift-devops-monitor.svc.cluster.local", "Prometheus url")
 
 	flag.DurationVar(&idleSyncPeriod, "idle-sync-period", 10*time.Minute, "Interval to sync project idle status")
 	flag.DurationVar(&idleQueryPeriod, "idle-query-period", 30*time.Minute, "Period to compare network activity")

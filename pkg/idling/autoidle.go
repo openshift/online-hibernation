@@ -68,11 +68,11 @@ func (idler *Idler) Run(stopChan <-chan struct{}) {
 // over the IdleQueryPeriod for all pods, separated by namespace.  Only results with
 // network activity below the idler threshold are returned.  This function returns
 // a map of namespace:networkActivity (bytes).
-func (pm *Idler) GetNetworkActivity() map[string]float64 {
+func (idler *Idler) GetNetworkActivity() map[string]float64 {
 	glog.V(2).Infof("Auto-idler: Querying prometheus to get  network activity for projects")
-	queryAPI := prometheus.NewQueryAPI(pm.config.PrometheusClient)
-	// pm.conifg.Threshold can only be set via command line flags
-	query_string := fmt.Sprintf(`sum(delta(container_network_receive_bytes_total{namespace!=""}[%s])) by (namespace) < %v`, model.Duration(pm.config.IdleQueryPeriod).String(), pm.config.Threshold)
+	queryAPI := prometheus.NewQueryAPI(idler.config.PrometheusClient)
+	// idler.conifg.Threshold can only be set via command line flags
+	query_string := fmt.Sprintf(`sum(delta(container_network_receive_bytes_total{namespace!=""}[%s])) by (namespace) < %v`, model.Duration(idler.config.IdleQueryPeriod).String(), idler.config.Threshold)
 	result, err := queryAPI.Query(context.TODO(), query_string, time.Now())
 	if err != nil {
 		glog.Errorf("Auto-idler: %s", err)
