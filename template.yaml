@@ -56,6 +56,9 @@ parameters:
 - name: HIBERNATION_IMAGE
   description: The hibernation image
   value: hibernation
+- name: PROMETHEUS_URL
+  description: The url to access prometheus metrics
+  value: "https://prometheus.openshift-devops-monitor.svc.cluster.local"
 - name: LOG_LEVEL
   description: Verbosity level for glogging
   value: "2"
@@ -221,6 +224,7 @@ objects:
           - -idle-dry-run=${IDLE_DRYRUN}
           - -sleep-dry-run=${SLEEP_DRYRUN}
           - -idle-threshold=${IDLE_THRESHOLD}
+          - -prometheus-url=${PROMETHEUS_URL}
           - -v=${LOG_LEVEL}
           - -logtostderr
           - -collectRuntime=${METRICS_COLLECT_RUNTIME}
