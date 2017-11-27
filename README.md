@@ -14,6 +14,13 @@ Every `IDLE_SYNC_PERIOD`, prometheus metrics will be queried to get the cumulati
 
 The auto-idler queries prometheus.  Therefore, prometheus must be deployed in the cluster to run the auto-idling controller.
 
+```
+Note: Prometheus has a default collection interval of 1 minute.  A query has to be at least 2 times
+      that interval.  Therefore, in testing this component, the IDLE_QUERY_PERIOD should never be
+      set to less than 2 minutes.  Prometheus will not return any projects as below idling threshold
+      if the query period is less than 2 minutes.
+```
+
 Usage - deploy in cluster with the following:
 ```
 oc create -f template.yaml -n openshift-infra
