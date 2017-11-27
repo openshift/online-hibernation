@@ -127,8 +127,6 @@ func (idler *Idler) sync(netmap map[string]float64) {
 				}
 			}
 			if !nsInMap {
-				// Only way to get here is if proj has scalable pods but not in returned map of below_threshold projs
-				glog.V(2).Infof("Auto-idler: Project( %s )network activity above idling threshold", ns)
 				glog.V(2).Infof("Auto-idler: Project( %s )sync complete", ns)
 			}
 		}
