@@ -6,14 +6,12 @@ import (
 
 	"github.com/golang/glog"
 	"github.com/openshift/online-hibernation/pkg/cache"
-	"github.com/openshift/origin/pkg/cmd/util/clientcmd"
 	"github.com/prometheus/client_golang/api/prometheus"
 	"github.com/prometheus/common/model"
 
-	buildapi "github.com/openshift/origin/pkg/build/api"
 	"golang.org/x/net/context"
-	"k8s.io/kubernetes/pkg/util/wait"
-	"k8s.io/kubernetes/pkg/util/workqueue"
+	"k8s.io/apimachinery/pkg/util/wait"
+	"k8s.io/client-go/util/workqueue"
 )
 
 const MaxRetries = 2
@@ -32,21 +30,18 @@ type IdlerConfig struct {
 
 // Idler is the auto-idler object
 type Idler struct {
-	factory           *clientcmd.Factory
-	config            *IdlerConfig
-	resources         *cache.Cache
-	queue             workqueue.RateLimitingInterface
-	stopChannel       <-chan struct{}
+	config    *IdlerConfig
+	resources *cache.Cache
+	queue     workqueue.RateLimitingInterface
+	stopChan  <-chan struct{}
 }
 
 // NewIdler returns an Idler object
-//func NewIdler(ic *IdlerConfig, f *clientcmd.Factory, c *cache.Cache, pmi PrometheusMetricsInterface, pm PrometheusMetrics) *Idler {
-func NewIdler(ic *IdlerConfig, f *clientcmd.Factory, c *cache.Cache) *Idler {
+func NewIdler(ic *IdlerConfig, c *cache.Cache) *Idler {
 	ctrl := &Idler{
-		config:            ic,
-		factory:           f,
-		resources:         c,
-		queue:             workqueue.NewNamedRateLimitingQueue(workqueue.DefaultControllerRateLimiter(), "auto-idler"),
+		config:    ic,
+		resources: c,
+		queue:     workqueue.NewNamedRateLimitingQueue(workqueue.DefaultControllerRateLimiter(), "auto-idler"),
 	}
 	return ctrl
 }
@@ -54,7 +49,7 @@ func NewIdler(ic *IdlerConfig, f *clientcmd.Factory, c *cache.Cache) *Idler {
 // Run starts the idler controller and keeps it going until
 // the given channel is closed.
 func (idler *Idler) Run(stopChan <-chan struct{}) {
-	idler.stopChannel = stopChan
+	idler.stopChan = stopChan
 	go wait.Until(idler.getNetmapAndSync, idler.config.IdleSyncPeriod, stopChan)
 	for i := 1; i <= idler.config.SyncWorkers; i++ {
 		go wait.Until(idler.startWorker(), time.Second, stopChan)
@@ -113,7 +108,7 @@ func (idler *Idler) sync(netmap map[string]float64) {
 		}
 		if !scalable {
 			glog.V(2).Infof("Auto-idler: Project( %s )sync complete", ns)
-			continue
+			return
 		}
 		if !idler.config.Exclude[ns] {
 			nsInMap := false
@@ -223,7 +218,7 @@ func (idler *Idler) checkForScalables(namespace string) (bool, error) {
 
 	for _, podObj := range projectPods {
 		pod := podObj.(*cache.ResourceObject)
-		if _, ok := pod.Labels[buildapi.BuildAnnotation]; ok {
+		if _, ok := pod.Labels[cache.BuildAnnotation]; ok {
 			if pod.IsStarted() {
 				glog.V(2).Infof("Auto-idler: Ignoring project( %s ), builder pod( %s ) found in project.", namespace, pod.Name)
 				return scalable, nil

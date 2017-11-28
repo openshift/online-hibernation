@@ -1,13 +1,23 @@
 package: github.com/openshift/online-hibernation
 
 import:
-# This is the core Origin dependency.
-- package: github.com/openshift/origin
-  version: v1.4.0
-  repo:    git@github.com:openshift/origin.git
-  vcs:     git
+- package: github.com/openshift/api
+  version: master
+
+- package: github.com/openshift/client-go
+  version: master
+
+- package: k8s.io/api
+  version: release-1.8
+
+- package: k8s.io/apimachinery
+  version: release-1.8
+
+- package: k8s.io/client-go
+  version: release-5.0
 
 - package: github.com/prometheus/client_golang/prometheus
   subpackage:
   - api/prometheus
   version: 6373fd93345740fc045eab648524bcbb65c3e690
+  

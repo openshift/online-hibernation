@@ -4,26 +4,40 @@ import (
 	"encoding/json"
 	"fmt"
 
-	osclient "github.com/openshift/origin/pkg/client"
-	"github.com/openshift/origin/pkg/cmd/util/clientcmd"
-	deployapi "github.com/openshift/origin/pkg/deploy/api"
-
 	"github.com/golang/glog"
+	"github.com/openshift/api/apps/v1"
+	osclient "github.com/openshift/client-go/apps/clientset/versioned"
+	appsv1 "github.com/openshift/client-go/apps/clientset/versioned/typed/apps/v1"
 
-	kapi "k8s.io/kubernetes/pkg/api"
-	kerrors "k8s.io/kubernetes/pkg/api/errors"
-	"k8s.io/kubernetes/pkg/api/meta"
-	"k8s.io/kubernetes/pkg/api/unversioned"
-	kcache "k8s.io/kubernetes/pkg/client/cache"
-	kclient "k8s.io/kubernetes/pkg/client/unversioned"
-	ctlresource "k8s.io/kubernetes/pkg/kubectl/resource"
-	"k8s.io/kubernetes/pkg/runtime"
-	"k8s.io/kubernetes/pkg/watch"
+	corev1 "k8s.io/api/core/v1"
+	kerrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
+	apimeta "k8s.io/apimachinery/pkg/api/meta"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/labels"
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/watch"
+	kclient "k8s.io/client-go/kubernetes"
+	kclientv1 "k8s.io/client-go/kubernetes/typed/core/v1"
+	restclient "k8s.io/client-go/rest"
+	kcache "k8s.io/client-go/tools/cache"
+
+	appsscheme "github.com/openshift/client-go/apps/clientset/versioned/scheme"
+	kscheme "k8s.io/client-go/kubernetes/scheme"
 )
+
+var Scheme = runtime.NewScheme()
+
+func init() {
+	kscheme.AddToScheme(Scheme)
+	appsscheme.AddToScheme(Scheme)
+}
 
 const (
 	PodKind                   = "Pod"
 	RCKind                    = "ReplicationController"
+	DCKind                    = "DeploymentConfig"
 	ServiceKind               = "Service"
 	ProjectKind               = "Namespace"
 	ComputeQuotaName          = "compute-resources"
@@ -41,24 +55,26 @@ type ResourceIndexer interface {
 }
 
 type Cache struct {
-	Indexer     ResourceIndexer
-	OsClient    osclient.Interface
-	KubeClient  kclient.Interface
-	Factory     *clientcmd.Factory
-	stopChannel <-chan struct{}
+	Indexer    ResourceIndexer
+	OsClient   osclient.Interface
+	KubeClient kclient.Interface
+	Config     *restclient.Config
+	RESTMapper apimeta.RESTMapper
+	stopChan   <-chan struct{}
 }
 
-func NewCache(osClient osclient.Interface, kubeClient kclient.Interface, f *clientcmd.Factory, exclude map[string]bool) *Cache {
+func NewCache(osClient osclient.Interface, kubeClient kclient.Interface, config *restclient.Config, mapper apimeta.RESTMapper, exclude map[string]bool) *Cache {
 	return &Cache{
 		Indexer:    NewResourceStore(exclude, osClient, kubeClient),
 		OsClient:   osClient,
 		KubeClient: kubeClient,
-		Factory:    f,
+		Config:     config,
+		RESTMapper: mapper,
 	}
 }
 
 func (c *Cache) Run(stopChan <-chan struct{}) {
-	c.stopChannel = stopChan
+	c.stopChan = stopChan
 
 	//Call to watch for incoming events
 	c.SetUpIndexer()
@@ -101,19 +117,15 @@ func (c *Cache) GetPodsForService(svc *ResourceObject, podList []interface{}) ma
 	pods := make(map[string]runtime.Object)
 	for _, obj := range podList {
 		pod := obj.(*ResourceObject)
-		for podKey, podVal := range pod.Labels {
-			for svcKey, svcVal := range svc.Selectors {
-				if _, exists := pods[pod.Name]; !exists && svcKey == podKey && svcVal == podVal {
-					podRef, err := c.KubeClient.Pods(pod.Namespace).Get(pod.Name)
-					if err != nil {
-						// This may fail when a pod has been deleted but not yet pruned from cache
-						// glog.Errorf?
-						glog.V(3).Infof("Project( %s ): %s, continuing...\n", pod.Namespace, err)
-						continue
-					}
-					pods[pod.Name] = podRef
-				}
+		if svc.Selectors.Matches(labels.Set(pod.Labels)) {
+			podRef, err := c.KubeClient.CoreV1().Pods(pod.Namespace).Get(pod.Name, metav1.GetOptions{})
+			if err != nil {
+				// This may fail when a pod has been deleted but not yet pruned from cache
+				// glog.Errorf?
+				glog.V(3).Infof("Project( %s ): %s, continuing...\n", pod.Namespace, err)
+				continue
 			}
+			pods[pod.Name] = podRef
 		}
 	}
 	return pods
@@ -122,8 +134,8 @@ func (c *Cache) GetPodsForService(svc *ResourceObject, podList []interface{}) ma
 // Takes a list of Pods and looks at their parent controllers
 // Then takes that list of parent controllers and checks if there is another parent above them
 // ex. pod -> RC -> DC, DC is the main parent controller we want to idle
-func (c *Cache) FindScalableResourcesForService(pods map[string]runtime.Object) (map[kapi.ObjectReference]struct{}, error) {
-	immediateControllerRefs := make(map[kapi.ObjectReference]struct{})
+func (c *Cache) FindScalableResourcesForService(pods map[string]runtime.Object) (map[corev1.ObjectReference]struct{}, error) {
+	immediateControllerRefs := make(map[corev1.ObjectReference]struct{})
 	for _, pod := range pods {
 		controllerRef, err := GetControllerRef(pod)
 		if err != nil {
@@ -132,18 +144,18 @@ func (c *Cache) FindScalableResourcesForService(pods map[string]runtime.Object) 
 		immediateControllerRefs[*controllerRef] = struct{}{}
 	}
 
-	controllerRefs := make(map[kapi.ObjectReference]struct{})
+	controllerRefs := make(map[corev1.ObjectReference]struct{})
 	for controllerRef := range immediateControllerRefs {
-		controller, err := GetController(controllerRef, c.Factory)
+		controller, err := GetController(controllerRef, c.RESTMapper, c.Config)
 		if err != nil {
 			return nil, err
 		}
 
 		if controller != nil {
-			var parentControllerRef *kapi.ObjectReference
+			var parentControllerRef *corev1.ObjectReference
 			parentControllerRef, err = GetControllerRef(controller)
 			if err != nil {
-				return nil, fmt.Errorf("Unable to load the creator of %s %q: %v", controllerRef.Kind, controllerRef.Name, err)
+				return nil, fmt.Errorf("unable to load the creator of %s %q: %v", controllerRef.Kind, controllerRef.Name, err)
 			}
 
 			if parentControllerRef == nil {
@@ -157,7 +169,7 @@ func (c *Cache) FindScalableResourcesForService(pods map[string]runtime.Object) 
 }
 
 // Returns an ObjectReference to the parent controller (RC/DC) for a resource
-func GetControllerRef(obj runtime.Object) (*kapi.ObjectReference, error) {
+func GetControllerRef(obj runtime.Object) (*corev1.ObjectReference, error) {
 	objMeta, err := meta.Accessor(obj)
 	if err != nil {
 		return nil, err
@@ -165,22 +177,23 @@ func GetControllerRef(obj runtime.Object) (*kapi.ObjectReference, error) {
 
 	annotations := objMeta.GetAnnotations()
 
-	creatorRefRaw, creatorListed := annotations[kapi.CreatedByAnnotation]
+	creatorRefRaw, creatorListed := annotations[corev1.CreatedByAnnotation]
 	if !creatorListed {
 		// if we don't have a creator listed, try the openshift-specific Deployment annotation
-		dcName, dcNameListed := annotations[deployapi.DeploymentConfigAnnotation]
+		// TODO: fix this, shouldn't have to depend on annotation?
+		dcName, dcNameListed := annotations[OpenShiftDCName]
 		if !dcNameListed {
 			return nil, nil
 		}
 
-		return &kapi.ObjectReference{
+		return &corev1.ObjectReference{
 			Name:      dcName,
 			Namespace: objMeta.GetNamespace(),
-			Kind:      "DeploymentConfig",
+			Kind:      DCKind,
 		}, nil
 	}
 
-	serializedRef := &kapi.SerializedReference{}
+	serializedRef := &corev1.SerializedReference{}
 	err = json.Unmarshal([]byte(creatorRefRaw), serializedRef)
 	if err != nil {
 		return nil, err
@@ -189,46 +202,70 @@ func GetControllerRef(obj runtime.Object) (*kapi.ObjectReference, error) {
 }
 
 // Returns a generic runtime.Object for a controller
-func GetController(ref kapi.ObjectReference, f *clientcmd.Factory) (runtime.Object, error) {
-	mapper, _ := f.Object(true)
-	gv, err := unversioned.ParseGroupVersion(ref.APIVersion)
-	if err != nil {
-		return nil, err
-	}
-	var mapping *meta.RESTMapping
-	mapping, err = mapper.RESTMapping(unversioned.GroupKind{Group: gv.Group, Kind: ref.Kind}, "")
-	if err != nil {
-		return nil, err
-	}
-	var client ctlresource.RESTClient
-	client, err = f.ClientForMapping(mapping)
-	if err != nil {
-		return nil, err
-	}
-	helper := ctlresource.NewHelper(client, mapping)
-
-	var controller runtime.Object
-	controller, err = helper.Get(ref.Namespace, ref.Name, false)
+func GetController(ref corev1.ObjectReference, restMapper apimeta.RESTMapper, restConfig *restclient.Config) (runtime.Object, error) {
+	// copy the config
+	newConfig := *restConfig
+	gv, err := schema.ParseGroupVersion(ref.APIVersion)
 	if err != nil {
 		return nil, err
 	}
 
-	return controller, nil
+	if ref.Kind == DCKind {
+		gv = v1.SchemeGroupVersion
+	}
+	mapping, err := restMapper.RESTMapping(schema.GroupKind{Group: gv.Group, Kind: ref.Kind})
+	if err != nil {
+		return nil, err
+	}
+	newConfig.GroupVersion = &gv
+	switch gv.Group {
+	case corev1.GroupName:
+		newConfig.APIPath = "/api"
+	default:
+		newConfig.APIPath = "/apis"
+	}
+
+	if ref.Kind == DCKind {
+		oc := appsv1.NewForConfigOrDie(&newConfig)
+		oclient := oc.RESTClient()
+		req := oclient.Get().
+			NamespaceIfScoped(ref.Namespace, mapping.Scope.Name() == apimeta.RESTScopeNameNamespace).
+			Resource(mapping.Resource).
+			Name(ref.Name).Do()
+
+		result, err := req.Get()
+		if err != nil {
+			return nil, err
+		}
+		return result, nil
+	}
+	kc := kclientv1.NewForConfigOrDie(&newConfig)
+	client := kc.RESTClient()
+	req := client.Get().
+		NamespaceIfScoped(ref.Namespace, mapping.Scope.Name() == apimeta.RESTScopeNameNamespace).
+		Resource(mapping.Resource).
+		Name(ref.Name).Do()
+
+	result, err := req.Get()
+	if err != nil {
+		return nil, err
+	}
+	return result, nil
 }
 
-func (c *Cache) GetAndCopyEndpoint(namespace, name string) (*kapi.Endpoints, error) {
-	endpointInterface := c.KubeClient.Endpoints(namespace)
-	endpoint, err := endpointInterface.Get(name)
+func (c *Cache) GetAndCopyEndpoint(namespace, name string) (*corev1.Endpoints, error) {
+	endpointInterface := c.KubeClient.CoreV1().Endpoints(namespace)
+	endpoint, err := endpointInterface.Get(name, metav1.GetOptions{})
 	if err != nil {
 		if !kerrors.IsNotFound(err) {
 			return nil, fmt.Errorf("Error getting endpoint in namespace( %s ): %s", namespace, err)
 		}
 	}
-	copy, err := kapi.Scheme.DeepCopy(endpoint)
+	copy, err := Scheme.DeepCopy(endpoint)
 	if err != nil {
 		return nil, fmt.Errorf("Error copying endpoint in namespace( %s ): %s", namespace, err)
 	}
-	newEndpoint := copy.(*kapi.Endpoints)
+	newEndpoint := copy.(*corev1.Endpoints)
 
 	if newEndpoint.Annotations == nil {
 		newEndpoint.Annotations = make(map[string]string)
@@ -270,44 +307,47 @@ func indexResourceByNamespaceAndKind(obj interface{}) ([]string, error) {
 }
 
 func (c *Cache) SetUpIndexer() {
-
 	podLW := &kcache.ListWatch{
-		ListFunc: func(options kapi.ListOptions) (runtime.Object, error) {
-			return c.KubeClient.Pods(kapi.NamespaceAll).List(options)
+		ListFunc: func(options metav1.ListOptions) (runtime.Object, error) {
+			return c.KubeClient.CoreV1().Pods(metav1.NamespaceAll).List(options)
 		},
-		WatchFunc: func(options kapi.ListOptions) (watch.Interface, error) {
-			return c.KubeClient.Pods(kapi.NamespaceAll).Watch(options)
+		WatchFunc: func(options metav1.ListOptions) (watch.Interface, error) {
+			return c.KubeClient.CoreV1().Pods(metav1.NamespaceAll).Watch(options)
 		},
 	}
-	kcache.NewReflector(podLW, &kapi.Pod{}, c.Indexer, 0).Run()
+	podr := kcache.NewReflector(podLW, &corev1.Pod{}, c.Indexer, 0)
+	go podr.Run(c.stopChan)
 
 	rcLW := &kcache.ListWatch{
-		ListFunc: func(options kapi.ListOptions) (runtime.Object, error) {
-			return c.KubeClient.ReplicationControllers(kapi.NamespaceAll).List(options)
+		ListFunc: func(options metav1.ListOptions) (runtime.Object, error) {
+			return c.KubeClient.CoreV1().ReplicationControllers(metav1.NamespaceAll).List(options)
 		},
-		WatchFunc: func(options kapi.ListOptions) (watch.Interface, error) {
-			return c.KubeClient.ReplicationControllers(kapi.NamespaceAll).Watch(options)
+		WatchFunc: func(options metav1.ListOptions) (watch.Interface, error) {
+			return c.KubeClient.CoreV1().ReplicationControllers(metav1.NamespaceAll).Watch(options)
 		},
 	}
-	kcache.NewReflector(rcLW, &kapi.ReplicationController{}, c.Indexer, 0).Run()
+	rcr := kcache.NewReflector(rcLW, &corev1.ReplicationController{}, c.Indexer, 0)
+	go rcr.Run(c.stopChan)
 
 	svcLW := &kcache.ListWatch{
-		ListFunc: func(options kapi.ListOptions) (runtime.Object, error) {
-			return c.KubeClient.Services(kapi.NamespaceAll).List(options)
+		ListFunc: func(options metav1.ListOptions) (runtime.Object, error) {
+			return c.KubeClient.CoreV1().Services(metav1.NamespaceAll).List(options)
 		},
-		WatchFunc: func(options kapi.ListOptions) (watch.Interface, error) {
-			return c.KubeClient.Services(kapi.NamespaceAll).Watch(options)
+		WatchFunc: func(options metav1.ListOptions) (watch.Interface, error) {
+			return c.KubeClient.CoreV1().Services(metav1.NamespaceAll).Watch(options)
 		},
 	}
-	kcache.NewReflector(svcLW, &kapi.Service{}, c.Indexer, 0).Run()
+	svcr := kcache.NewReflector(svcLW, &corev1.Service{}, c.Indexer, 0)
+	go svcr.Run(c.stopChan)
 
 	projLW := &kcache.ListWatch{
-		ListFunc: func(options kapi.ListOptions) (runtime.Object, error) {
-			return c.KubeClient.Namespaces().List(options)
+		ListFunc: func(options metav1.ListOptions) (runtime.Object, error) {
+			return c.KubeClient.CoreV1().Namespaces().List(options)
 		},
-		WatchFunc: func(options kapi.ListOptions) (watch.Interface, error) {
-			return c.KubeClient.Namespaces().Watch(options)
+		WatchFunc: func(options metav1.ListOptions) (watch.Interface, error) {
+			return c.KubeClient.CoreV1().Namespaces().Watch(options)
 		},
 	}
-	kcache.NewReflector(projLW, &kapi.Namespace{}, c.Indexer, 0).Run()
+	projr := kcache.NewReflector(projLW, &corev1.Namespace{}, c.Indexer, 0)
+	go projr.Run(c.stopChan)
 }

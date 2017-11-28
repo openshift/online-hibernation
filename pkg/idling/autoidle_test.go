@@ -7,21 +7,24 @@ import (
 	"time"
 
 	"github.com/openshift/online-hibernation/pkg/cache"
+	fakecache "github.com/openshift/online-hibernation/pkg/cache/fake"
 
-	"github.com/openshift/origin/pkg/client/testclient"
-	"github.com/openshift/origin/pkg/cmd/util/clientcmd"
-	deployapi "github.com/openshift/origin/pkg/deploy/api"
+	appsv1 "github.com/openshift/api/apps/v1"
+	fakeoclientset "github.com/openshift/client-go/apps/clientset/versioned/fake"
 	"github.com/stretchr/testify/assert"
 
-	"github.com/spf13/pflag"
+	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/discovery"
 
-	kapi "k8s.io/kubernetes/pkg/api"
-	"k8s.io/kubernetes/pkg/api/resource"
-	"k8s.io/kubernetes/pkg/api/unversioned"
-	ktestclient "k8s.io/kubernetes/pkg/client/unversioned/testclient"
-	"k8s.io/kubernetes/pkg/runtime"
-	"k8s.io/kubernetes/pkg/types"
-	"k8s.io/kubernetes/pkg/util/workqueue"
+	"k8s.io/apimachinery/pkg/api/resource"
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
+	fakekclientset "k8s.io/client-go/kubernetes/fake"
+	"k8s.io/client-go/kubernetes/scheme"
+	restclient "k8s.io/client-go/rest"
+	ktesting "k8s.io/client-go/testing"
+	"k8s.io/client-go/util/workqueue"
 )
 
 func init() {
@@ -33,42 +36,33 @@ func TestSync(t *testing.T) {
 		idleDryRun             bool
 		exclude                map[string]bool
 		netmap                 map[string]float64
-		deploymentConfigs      []*deployapi.DeploymentConfig
-		pods                   []*kapi.Pod
-		services               []*kapi.Service
-		replicationControllers []*kapi.ReplicationController
+		deploymentConfigs      []*appsv1.DeploymentConfig
+		pods                   []*corev1.Pod
+		services               []*corev1.Service
+		replicationControllers []*corev1.ReplicationController
 		resources              []*cache.ResourceObject
 		expectedQueueLen       int
 		expectedQueueKeys      []string
 	}{
 		"Single item added to queue": {
 			idleDryRun: false,
-			netmap:     map[string]float64{"somens1": 1000, "somens2": 1000},
-			exclude:    map[string]bool{"foo": true},
-			pods: []*kapi.Pod{
+			netmap:     map[string]float64{"somens1": 1000},
+			exclude:    map[string]bool{"somens3": true},
+			pods: []*corev1.Pod{
 				pod("somepod1", "somens1"),
-				pod("somepod2", "somens2"),
 			},
-			services: []*kapi.Service{
+			services: []*corev1.Service{
 				svc("somesvc1", "somens1"),
-				svc("somesvc2", "somens2"),
 			},
-			replicationControllers: []*kapi.ReplicationController{
+			replicationControllers: []*corev1.ReplicationController{
 				rc("somerc1", "somens1"),
-				rc("somerc2", "somens2"),
 			},
-			deploymentConfigs: []*deployapi.DeploymentConfig{
+			deploymentConfigs: []*appsv1.DeploymentConfig{
 				dc("apoddc", "somens1"),
-				dc("anotherpoddc", "somens2"),
 			},
 			resources: []*cache.ResourceObject{
 				projectResource("somens1", false),
-				projectResource("somens2", false),
 				rcResource("somerc1", "somerc1", "somens1", "1", "apoddc", []*cache.RunningTime{
-					runningTime(time.Now().Add(-1*time.Hour),
-						time.Time{}),
-				}),
-				rcResource("somerc2", "somerc2", "somens2", "1", "anotherpoddc", []*cache.RunningTime{
 					runningTime(time.Now().Add(-1*time.Hour),
 						time.Time{}),
 				}),
@@ -79,37 +73,29 @@ func TestSync(t *testing.T) {
 							time.Time{}),
 					},
 					map[string]string{"app": "anapp", "deploymentconfig": "apoddc"}),
-				podResource("somepod2", "somepod2", "somens2", "2",
-					resource.MustParse("1G"),
-					[]*cache.RunningTime{
-						runningTime(time.Now().Add(-1*time.Hour),
-							time.Time{}),
-					},
-					map[string]string{"app": "anotherapp", "deploymentconfig": "anotherpoddc"}),
-				svcResource("1234", "somesvc1", "somens1", "1", map[string]string{"foo": "bar"}),
-				svcResource("5678", "somesvc2", "somens2", "2", map[string]string{"app": "anotherapp", "deploymentconfig": "anotherpoddc"}),
+				svcResource("1234", "somesvc1", "somens1", "1", map[string]string{"app": "anapp", "deploymentconfig": "apoddc"}),
 			},
 			expectedQueueLen:  1,
-			expectedQueueKeys: []string{"somens2"},
+			expectedQueueKeys: []string{"somens1"},
 		},
 
 		"2 items added to queue": {
 			idleDryRun: false,
 			netmap:     map[string]float64{"somens2": 1000, "somens1": 1000},
 			exclude:    map[string]bool{"somens3": true},
-			pods: []*kapi.Pod{
+			pods: []*corev1.Pod{
 				pod("somepod1", "somens1"),
 				pod("somepod2", "somens2"),
 			},
-			services: []*kapi.Service{
+			services: []*corev1.Service{
 				svc("somesvc1", "somens1"),
 				svc("somesvc2", "somens2"),
 			},
-			replicationControllers: []*kapi.ReplicationController{
+			replicationControllers: []*corev1.ReplicationController{
 				rc("somerc1", "somens1"),
 				rc("somerc2", "somens2"),
 			},
-			deploymentConfigs: []*deployapi.DeploymentConfig{
+			deploymentConfigs: []*appsv1.DeploymentConfig{
 				dc("apoddc", "somens1"),
 				dc("anotherpoddc", "somens2"),
 			},
@@ -149,16 +135,16 @@ func TestSync(t *testing.T) {
 			idleDryRun: false,
 			netmap:     map[string]float64{"somens2": 1000, "somens1": 1000},
 			exclude:    map[string]bool{"somens2": true},
-			pods: []*kapi.Pod{
+			pods: []*corev1.Pod{
 				pod("somepod2", "somens2"),
 			},
-			services: []*kapi.Service{
+			services: []*corev1.Service{
 				svc("somesvc2", "somens2"),
 			},
-			replicationControllers: []*kapi.ReplicationController{
+			replicationControllers: []*corev1.ReplicationController{
 				rc("somerc2", "somens2"),
 			},
-			deploymentConfigs: []*deployapi.DeploymentConfig{
+			deploymentConfigs: []*appsv1.DeploymentConfig{
 				dc("anotherpoddc", "somens2"),
 			},
 			resources: []*cache.ResourceObject{
@@ -184,16 +170,16 @@ func TestSync(t *testing.T) {
 			idleDryRun: false,
 			netmap:     map[string]float64{"somens2": 1000, "somens1": 1000},
 			exclude:    map[string]bool{"foo": true},
-			pods: []*kapi.Pod{
+			pods: []*corev1.Pod{
 				pod("somepod2", "somens2"),
 			},
-			services: []*kapi.Service{
+			services: []*corev1.Service{
 				svc("somesvc2", "somens2"),
 			},
-			replicationControllers: []*kapi.ReplicationController{
+			replicationControllers: []*corev1.ReplicationController{
 				rc("somerc2", "somens2"),
 			},
-			deploymentConfigs: []*deployapi.DeploymentConfig{
+			deploymentConfigs: []*appsv1.DeploymentConfig{
 				dc("anotherpoddc", "somens2"),
 			},
 			resources: []*cache.ResourceObject{
@@ -219,19 +205,19 @@ func TestSync(t *testing.T) {
 			idleDryRun: true,
 			netmap:     map[string]float64{"somens2": 1000, "somens1": 1000},
 			exclude:    map[string]bool{"somens3": true},
-			pods: []*kapi.Pod{
+			pods: []*corev1.Pod{
 				pod("somepod1", "somens1"),
 				pod("somepod2", "somens2"),
 			},
-			services: []*kapi.Service{
+			services: []*corev1.Service{
 				svc("somesvc1", "somens1"),
 				svc("somesvc2", "somens2"),
 			},
-			replicationControllers: []*kapi.ReplicationController{
+			replicationControllers: []*corev1.ReplicationController{
 				rc("somerc1", "somens1"),
 				rc("somerc2", "somens2"),
 			},
-			deploymentConfigs: []*deployapi.DeploymentConfig{
+			deploymentConfigs: []*appsv1.DeploymentConfig{
 				dc("apoddc", "somens1"),
 				dc("anotherpoddc", "somens2"),
 			},
@@ -271,19 +257,19 @@ func TestSync(t *testing.T) {
 			idleDryRun: false,
 			netmap:     map[string]float64{"somens2": 1000, "somens1": 1000},
 			exclude:    map[string]bool{"somens4": true},
-			pods: []*kapi.Pod{
+			pods: []*corev1.Pod{
 				pod("somepod1", "somens1"),
 				pod("somepod2", "somens2"),
 			},
-			services: []*kapi.Service{
+			services: []*corev1.Service{
 				svc("somesvc1", "somens1"),
 				svc("somesvc2", "somens2"),
 			},
-			replicationControllers: []*kapi.ReplicationController{
+			replicationControllers: []*corev1.ReplicationController{
 				rc("somerc1", "somens1"),
 				rc("somerc2", "somens2"),
 			},
-			deploymentConfigs: []*deployapi.DeploymentConfig{
+			deploymentConfigs: []*appsv1.DeploymentConfig{
 				dc("apoddc", "somens1"),
 				dc("anotherpoddc", "somens2"),
 			},
@@ -322,7 +308,6 @@ func TestSync(t *testing.T) {
 
 	for name, test := range tests {
 		t.Logf("Testing: %s", name)
-		factory := clientcmd.New(pflag.NewFlagSet("empty", pflag.ContinueOnError))
 		exclude := test.exclude
 		config := &IdlerConfig{
 			Exclude:         exclude,
@@ -332,42 +317,53 @@ func TestSync(t *testing.T) {
 			SyncWorkers:     2,
 			IdleDryRun:      test.idleDryRun,
 		}
-		fakeOClient := &testclient.Fake{}
-		fakeClient := &ktestclient.Fake{}
-		fakeOClient.AddReactor("list", "deploymentconfigs", func(action ktestclient.Action) (handled bool, ret runtime.Object, err error) {
-			list := &deployapi.DeploymentConfigList{}
+
+		clientConfig := &restclient.Config{
+			Host: "127.0.0.1",
+			ContentConfig: restclient.ContentConfig{GroupVersion: &corev1.SchemeGroupVersion,
+				NegotiatedSerializer: scheme.Codecs},
+		}
+		fakeOClient := fakeoclientset.NewSimpleClientset()
+		fakeClient := &fakekclientset.Clientset{}
+
+		cachedDiscovery := fakecache.FakeCachedDiscoveryInterface{}
+
+		restMapper := discovery.NewDeferredDiscoveryRESTMapper(&cachedDiscovery, nil)
+		restMapper.Reset()
+		fakeOClient.AddReactor("list", "deploymentconfigs", func(action ktesting.Action) (handled bool, ret runtime.Object, err error) {
+			list := &appsv1.DeploymentConfigList{}
 			for i := range test.deploymentConfigs {
 				list.Items = append(list.Items, *test.deploymentConfigs[i])
 			}
 			return true, list, nil
 		})
 
-		fakeClient.AddReactor("list", "services", func(action ktestclient.Action) (handled bool, resp runtime.Object, err error) {
-			list := &kapi.ServiceList{}
+		fakeClient.AddReactor("list", "services", func(action ktesting.Action) (handled bool, resp runtime.Object, err error) {
+			list := &corev1.ServiceList{}
 			for i := range test.services {
 				list.Items = append(list.Items, *test.services[i])
 			}
 			return true, list, nil
 		})
 
-		fakeClient.AddReactor("list", "replicationcontrollers", func(action ktestclient.Action) (handled bool, resp runtime.Object, err error) {
-			list := &kapi.ReplicationControllerList{}
+		fakeClient.AddReactor("list", "replicationcontrollers", func(action ktesting.Action) (handled bool, resp runtime.Object, err error) {
+			list := &corev1.ReplicationControllerList{}
 			for i := range test.replicationControllers {
 				list.Items = append(list.Items, *test.replicationControllers[i])
 			}
 			return true, list, nil
 		})
 
-		fakeClient.AddReactor("list", "pods", func(action ktestclient.Action) (handled bool, resp runtime.Object, err error) {
-			list := &kapi.PodList{}
+		fakeClient.AddReactor("list", "pods", func(action ktesting.Action) (handled bool, resp runtime.Object, err error) {
+			list := &corev1.PodList{}
 			for i := range test.pods {
 				list.Items = append(list.Items, *test.pods[i])
 			}
 			return true, list, nil
 		})
 
-		fakeCache := cache.NewCache(fakeOClient, fakeClient, factory, exclude)
-		idler := NewIdler(config, factory, fakeCache)
+		fakeCache := cache.NewCache(fakeOClient, fakeClient, clientConfig, restMapper, exclude)
+		idler := NewIdler(config, fakeCache)
 		for _, resource := range test.resources {
 			err := idler.resources.Indexer.AddResourceObject(resource)
 			if err != nil {
@@ -377,53 +373,53 @@ func TestSync(t *testing.T) {
 		idler.sync(test.netmap)
 		assert.Equal(t, idler.queue.Len(), test.expectedQueueLen, "expected items did not match actual items in workqueue")
 		nsList := examineQueue(idler.queue)
-		assert.Equal(t, nsList, test.expectedQueueKeys, "unexpected project added to queue")
+		assert.Equal(t, nsList, test.expectedQueueKeys, "unexpected queue contents")
 		idler.queue.ShutDown()
 	}
 }
 
-func pod(name, namespace string) *kapi.Pod {
-	return &kapi.Pod{
-		TypeMeta: unversioned.TypeMeta{
+func pod(name, namespace string) *corev1.Pod {
+	return &corev1.Pod{
+		TypeMeta: metav1.TypeMeta{
 			Kind: "Pod",
 		},
-		ObjectMeta: kapi.ObjectMeta{
+		ObjectMeta: metav1.ObjectMeta{
 			Name:      name,
 			Namespace: namespace,
 		},
 	}
 }
 
-func rc(name, namespace string) *kapi.ReplicationController {
-	return &kapi.ReplicationController{
-		TypeMeta: unversioned.TypeMeta{
+func rc(name, namespace string) *corev1.ReplicationController {
+	return &corev1.ReplicationController{
+		TypeMeta: metav1.TypeMeta{
 			Kind: "ReplicationController",
 		},
-		ObjectMeta: kapi.ObjectMeta{
+		ObjectMeta: metav1.ObjectMeta{
 			Name:      name,
 			Namespace: namespace,
 		},
 	}
 }
 
-func svc(name, namespace string) *kapi.Service {
-	return &kapi.Service{
-		TypeMeta: unversioned.TypeMeta{
+func svc(name, namespace string) *corev1.Service {
+	return &corev1.Service{
+		TypeMeta: metav1.TypeMeta{
 			Kind: "Service",
 		},
-		ObjectMeta: kapi.ObjectMeta{
+		ObjectMeta: metav1.ObjectMeta{
 			Name:      name,
 			Namespace: namespace,
 		},
 	}
 }
 
-func dc(name, namespace string) *deployapi.DeploymentConfig {
-	return &deployapi.DeploymentConfig{
-		TypeMeta: unversioned.TypeMeta{
+func dc(name, namespace string) *appsv1.DeploymentConfig {
+	return &appsv1.DeploymentConfig{
+		TypeMeta: metav1.TypeMeta{
 			Kind: "ReplicationController",
 		},
-		ObjectMeta: kapi.ObjectMeta{
+		ObjectMeta: metav1.ObjectMeta{
 			Name:      name,
 			Namespace: namespace,
 		},
@@ -457,13 +453,14 @@ func rcResource(uid, name, namespace, resourceVersion, dc string, rt []*cache.Ru
 }
 
 func svcResource(uid string, name string, namespace string, resourceVersion string, selectors map[string]string) *cache.ResourceObject {
+	selector, _ := metav1.LabelSelectorAsSelector(&metav1.LabelSelector{MatchLabels: selectors})
 	return &cache.ResourceObject{
 		UID:             types.UID(uid),
 		Name:            name,
 		Namespace:       namespace,
 		Kind:            cache.ServiceKind,
 		ResourceVersion: resourceVersion,
-		Selectors:       selectors,
+		Selectors:       selector,
 	}
 }
 

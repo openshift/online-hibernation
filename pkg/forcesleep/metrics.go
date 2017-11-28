@@ -7,8 +7,6 @@ import (
 	"github.com/golang/glog"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
-
-	_ "github.com/openshift/origin/pkg/api/install"
 )
 
 type MetricsServer struct {

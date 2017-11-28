@@ -9,15 +9,14 @@ import (
 	"github.com/openshift/online-hibernation/pkg/cache"
 	"github.com/openshift/online-hibernation/pkg/idling"
 
-	"github.com/openshift/origin/pkg/cmd/util/clientcmd"
-
 	"github.com/golang/glog"
 
-	kapi "k8s.io/kubernetes/pkg/api"
-	kerrors "k8s.io/kubernetes/pkg/api/errors"
-	"k8s.io/kubernetes/pkg/api/resource"
-	"k8s.io/kubernetes/pkg/runtime"
-	"k8s.io/kubernetes/pkg/util/wait"
+	corev1 "k8s.io/api/core/v1"
+	kerrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/resource"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/util/wait"
+	clientv1 "k8s.io/client-go/kubernetes/typed/core/v1"
 )
 
 const (
@@ -36,33 +35,37 @@ type SleeperConfig struct {
 	TermQuota          resource.Quantity
 	NonTermQuota       resource.Quantity
 	DryRun             bool
+	QuotaClient        clientv1.ResourceQuotasGetter
 }
 
 type Sleeper struct {
-	factory           *clientcmd.Factory
 	config            *SleeperConfig
 	resources         *cache.Cache
-	projectSleepQuota runtime.Object
-	stopChannel       <-chan struct{}
+	projectSleepQuota *corev1.ResourceQuota
+	stopChan          <-chan struct{}
 }
 
-func NewSleeper(sc *SleeperConfig, f *clientcmd.Factory, c *cache.Cache) *Sleeper {
+func NewSleeper(sc *SleeperConfig, c *cache.Cache) *Sleeper {
 	ctrl := &Sleeper{
 		config:    sc,
-		factory:   f,
 		resources: c,
+		projectSleepQuota: &corev1.ResourceQuota{
+			ObjectMeta: metav1.ObjectMeta{
+				Name: ProjectSleepQuotaName,
+			},
+			Spec: corev1.ResourceQuotaSpec{
+				Hard: corev1.ResourceList{
+					"pods": *resource.NewMilliQuantity(0, resource.DecimalSI),
+				},
+			},
+		},
 	}
-	quota, err := ctrl.createSleepResources()
-	if err != nil {
-		glog.Fatalf("Force-sleeper: Error creating sleep resources: %s", err)
-	}
-	ctrl.projectSleepQuota = quota
 	return ctrl
 }
 
 // Main function for controller
 func (s *Sleeper) Run(stopChan <-chan struct{}) {
-	s.stopChannel = stopChan
+	s.stopChan = stopChan
 
 	// Spawn a goroutine to run project sync
 	go wait.Until(s.Sync, s.config.SleepSyncPeriod, stopChan)
@@ -103,7 +106,7 @@ func (s *Sleeper) applyProjectSleep(namespace string, sleepTime, wakeTime time.T
 	if err != nil {
 		return fmt.Errorf("Force-sleeper: %s", err)
 	}
-	projectCopy, err := kapi.Scheme.DeepCopy(proj)
+	projectCopy, err := cache.Scheme.DeepCopy(proj)
 	if err != nil {
 		return fmt.Errorf("Force-sleeper: %s", err)
 	}
@@ -136,11 +139,9 @@ func (s *Sleeper) applyProjectSleep(namespace string, sleepTime, wakeTime time.T
 	}
 
 	// Add force-sleep resource quota to object
-	quotaInterface := s.resources.KubeClient.ResourceQuotas(namespace)
-	quota := s.projectSleepQuota.(*kapi.ResourceQuota)
-	_, err = quotaInterface.Create(quota)
+	_, err = s.config.QuotaClient.ResourceQuotas(namespace).Create(s.projectSleepQuota)
 	if err != nil {
-		return fmt.Errorf("Force-sleeper: %s", err)
+		return fmt.Errorf("force-sleeper: %s", err)
 	}
 
 	failed := false
@@ -186,17 +187,17 @@ func (s *Sleeper) applyProjectSleep(namespace string, sleepTime, wakeTime time.T
 
 // Adds a cache.LastSleepTimeAnnotation to a namespace in the cluster
 func (s *Sleeper) addNamespaceSleepTimeAnnotation(name string, sleepTime time.Time) error {
-	ns, err := s.resources.KubeClient.Namespaces().Get(name)
-	nsCopy, err := kapi.Scheme.DeepCopy(ns)
+	ns, err := s.resources.KubeClient.CoreV1().Namespaces().Get(name, metav1.GetOptions{})
+	nsCopy, err := cache.Scheme.DeepCopy(ns)
 	if err != nil {
 		return fmt.Errorf("Force-sleeper: %s", err)
 	}
-	project := nsCopy.(*kapi.Namespace)
+	project := nsCopy.(*corev1.Namespace)
 	if project.Annotations == nil {
 		project.Annotations = make(map[string]string)
 	}
 	project.Annotations[cache.LastSleepTimeAnnotation] = sleepTime.String()
-	_, err = s.resources.KubeClient.Namespaces().Update(project)
+	_, err = s.resources.KubeClient.CoreV1().Namespaces().Update(project)
 	if err != nil {
 		return fmt.Errorf("Force-sleeper: %s", err)
 	}
@@ -205,19 +206,19 @@ func (s *Sleeper) addNamespaceSleepTimeAnnotation(name string, sleepTime time.Ti
 
 // Removes the cache.LastSleepTimeAnnotation to a namespace in the cluster
 func (s *Sleeper) removeNamespaceSleepTimeAnnotation(name string) error {
-	ns, err := s.resources.KubeClient.Namespaces().Get(name)
-	nsCopy, err := kapi.Scheme.DeepCopy(ns)
+	ns, err := s.resources.KubeClient.CoreV1().Namespaces().Get(name, metav1.GetOptions{})
+	nsCopy, err := cache.Scheme.DeepCopy(ns)
 	if err != nil {
 		return fmt.Errorf("Force-sleeper: %s", err)
 	}
-	project := nsCopy.(*kapi.Namespace)
+	project := nsCopy.(*corev1.Namespace)
 	if project.Annotations == nil {
 		// Sleep time annotation already doesn't exist
 		return nil
 	}
 
 	delete(project.Annotations, cache.LastSleepTimeAnnotation)
-	_, err = s.resources.KubeClient.Namespaces().Update(project)
+	_, err = s.resources.KubeClient.CoreV1().Namespaces().Update(project)
 	if err != nil {
 		return fmt.Errorf("Force-sleeper: %s", err)
 	}
@@ -250,8 +251,8 @@ func (s *Sleeper) wakeProject(project *cache.ResourceObject) error {
 		// First remove the force-sleep pod count resource quota from the project
 		glog.V(2).Infof("Force-sleeper: Removing sleep quota for project( %s )", namespace)
 		if !s.config.DryRun {
-			quotaInterface := s.resources.KubeClient.ResourceQuotas(namespace)
-			err := quotaInterface.Delete(ProjectSleepQuotaName)
+			quotaInterface := s.resources.KubeClient.CoreV1().ResourceQuotas(namespace)
+			err := quotaInterface.Delete(ProjectSleepQuotaName, &metav1.DeleteOptions{})
 			if err != nil {
 				if !kerrors.IsNotFound(err) {
 					return fmt.Errorf("Force-sleeper: Error removing sleep quota in project( %s ): %s", namespace, err)
@@ -278,7 +279,7 @@ func (s *Sleeper) wakeProject(project *cache.ResourceObject) error {
 			}
 		}
 
-		projectCopy, err := kapi.Scheme.DeepCopy(project)
+		projectCopy, err := cache.Scheme.DeepCopy(project)
 		if err != nil {
 			return fmt.Errorf("Force-sleeper: %s", err)
 		}
@@ -323,7 +324,7 @@ func (s *Sleeper) SetDryRunResourceRuntimes(namespace string) error {
 	}
 	for _, resource := range resources {
 		r := resource.(*cache.ResourceObject)
-		copy, err := kapi.Scheme.DeepCopy(r)
+		copy, err := cache.Scheme.DeepCopy(r)
 		if err != nil {
 			return fmt.Errorf("Force-sleeper: %s", err)
 		}
@@ -369,7 +370,7 @@ func (s *Sleeper) syncProject(namespace string) error {
 		if s.PrunePods(pod) {
 			continue
 		}
-		p, err := kapi.Scheme.DeepCopy(pod)
+		p, err := cache.Scheme.DeepCopy(pod)
 		if err != nil {
 			return fmt.Errorf("Force-sleeper: %s", err)
 		}
@@ -427,7 +428,7 @@ func (s *Sleeper) updateProjectSortIndex(namespace string, quotaSeconds float64)
 	if err != nil {
 		glog.Errorf("Force-sleeper: Error getting project resources: %s", err)
 	}
-	projectCopy, err := kapi.Scheme.DeepCopy(proj)
+	projectCopy, err := cache.Scheme.DeepCopy(proj)
 	if err != nil {
 		glog.Errorf("Force-sleeper: Couldn't copy project from cache: %v", err)
 		return
