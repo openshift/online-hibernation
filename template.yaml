@@ -96,7 +96,6 @@ objects:
     - namespaces
     - pods
     - replicationcontrollers
-    - deploymentconfigs
     - resourcequotas
     - services
     - endpoints
@@ -107,6 +106,17 @@ objects:
     - create
     - update
     - delete
+  - apiGroups:
+    - ""
+    - apps.openshift.io
+    resources:
+    - deploymentconfigs
+    verbs:
+    - get
+    - list
+    - watch
+    - update
+
 
 # A service account for use by hibernation
 - apiVersion: v1

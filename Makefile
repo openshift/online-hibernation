@@ -30,7 +30,7 @@ build: check-gopath
 #   make test-integration TESTFLAGS="-run TestSomething"
 test-integration: build
 	go test -v $(TESTFLAGS) \
-		github.com/openshift/online-hibernation/pkg/...
+		github.com/openshift/online-hibernation/pkg/forcesleep...
 
 .PHONY: test
 # Runs the unit tests.

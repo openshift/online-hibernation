@@ -7,31 +7,40 @@ import (
 
 	"github.com/openshift/online-hibernation/pkg/cache"
 
-	deployapi "github.com/openshift/origin/pkg/deploy/api"
-	unidlingapi "github.com/openshift/origin/pkg/unidling/api"
+	appsv1 "github.com/openshift/api/apps/v1"
 
 	"github.com/golang/glog"
-
-	kapi "k8s.io/kubernetes/pkg/api"
-	kerrors "k8s.io/kubernetes/pkg/api/errors"
+	corev1 "k8s.io/api/core/v1"
+	kerrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
-// The unidlingapi constants are copied over for consistency
+// These aren't in openshift/client-go, and we don't want to pull in
+// origin just for these, so we've copied them over until they're replaced
+// with actual types.
 const (
-	IdledAtAnnotation       = unidlingapi.IdledAtAnnotation
-	PreviousScaleAnnotation = unidlingapi.PreviousScaleAnnotation
-	UnidleTargetAnnotation  = unidlingapi.UnidleTargetAnnotation
+	// IdledAtAnnotation indicates that a given object (endpoints or scalable object))
+	// is currently idled (and the time at which it was idled)
+	IdledAtAnnotation = "idling.alpha.openshift.io/idled-at"
+
+	// UnidleTargetAnnotation contains the references and former scales for the scalable
+	// objects associated with the idled endpoints
+	UnidleTargetAnnotation = "idling.alpha.openshift.io/unidle-targets"
+
+	// PreviousScaleAnnotation contains the previous scale of a scalable object
+	// (currently only applied by the idler)
+	PreviousScaleAnnotation = "idling.alpha.openshift.io/previous-scale"
 )
 
 type ControllerScaleReference struct {
-	Kind     string
 	Name     string
+	Kind     string
 	Replicas int32
 }
 
 func ScaleProjectDCs(c *cache.Cache, namespace string) error {
-	dcInterface := c.OsClient.DeploymentConfigs(namespace)
-	dcList, err := dcInterface.List(kapi.ListOptions{})
+	dcInterface := c.OsClient.AppsV1().DeploymentConfigs(namespace)
+	dcList, err := dcInterface.List(metav1.ListOptions{})
 	if err != nil {
 		return err
 	}
@@ -39,11 +48,11 @@ func ScaleProjectDCs(c *cache.Cache, namespace string) error {
 	failed := false
 	for _, dc := range dcList.Items {
 		// Scale down DC
-		copy, err := kapi.Scheme.DeepCopy(dc)
+		copy, err := cache.Scheme.DeepCopy(dc)
 		if err != nil {
 			return err
 		}
-		newDC := copy.(deployapi.DeploymentConfig)
+		newDC := copy.(appsv1.DeploymentConfig)
 		newDC.Spec.Replicas = 0
 		_, err = dcInterface.Update(&newDC)
 		if err != nil {
@@ -61,8 +70,8 @@ func ScaleProjectDCs(c *cache.Cache, namespace string) error {
 
 func ScaleProjectRCs(c *cache.Cache, namespace string) error {
 	// Scale RCs to 0
-	rcInterface := c.KubeClient.ReplicationControllers(namespace)
-	rcList, err := rcInterface.List(kapi.ListOptions{})
+	rcInterface := c.KubeClient.CoreV1().ReplicationControllers(namespace)
+	rcList, err := rcInterface.List(metav1.ListOptions{})
 	if err != nil {
 		return err
 	}
@@ -73,12 +82,13 @@ func ScaleProjectRCs(c *cache.Cache, namespace string) error {
 		// Given thisRC name, check to see if thisRC has a DC
 		// If thisRC does not have an associated DC, then scale the RC,
 		if _, exists := thisRC.Spec.Selector["deploymentconfig"]; !exists {
-			copy, err := kapi.Scheme.DeepCopy(thisRC)
+			copy, err := cache.Scheme.DeepCopy(thisRC)
 			if err != nil {
 				return err
 			}
-			newRC := copy.(kapi.ReplicationController)
-			newRC.Spec.Replicas = 0
+			newRC := copy.(corev1.ReplicationController)
+			newRC.Spec.Replicas = new(int32)
+			*newRC.Spec.Replicas = 0
 			_, err = rcInterface.Update(&newRC)
 			if err != nil {
 				if !kerrors.IsNotFound(err) {
@@ -99,15 +109,15 @@ func ScaleProjectRCs(c *cache.Cache, namespace string) error {
 
 func DeleteProjectPods(c *cache.Cache, namespace string) error {
 	// Delete running pods.
-	podInterface := c.KubeClient.Pods(namespace)
-	podList, err := podInterface.List(kapi.ListOptions{})
+	podInterface := c.KubeClient.CoreV1().Pods(namespace)
+	podList, err := podInterface.List(metav1.ListOptions{})
 	if err != nil {
 		return err
 	}
 
 	failed := false
 	for _, pod := range podList.Items {
-		err = podInterface.Delete(pod.ObjectMeta.Name, &kapi.DeleteOptions{})
+		err = podInterface.Delete(pod.ObjectMeta.Name, &metav1.DeleteOptions{})
 		if err != nil {
 			if !kerrors.IsNotFound(err) {
 				glog.Errorf("Project( %s ) Pod( %s ): %s", namespace, pod.Name, err)
@@ -181,19 +191,19 @@ func AnnotateService(c *cache.Cache, svc *cache.ResourceObject, nowTime time.Tim
 	// Projects with 2 services sharing an RC will have unpredictable behavior of idling/auto-idling
 	// This needs to be fixed in oc idle code.  Will document with auto-idling documentation for now.
 	if annotation == PreviousScaleAnnotation {
-		endpointInterface := c.KubeClient.Endpoints(namespace)
+		endpointInterface := c.KubeClient.CoreV1().Endpoints(namespace)
 		newEndpoint, err := c.GetAndCopyEndpoint(namespace, svc.Name)
 		if err != nil {
 			return err
 		}
 		// Need to delete any previous IdledAtAnnotations to prevent premature unidling
-		if newEndpoint.Annotations[unidlingapi.IdledAtAnnotation] != "" {
+		if newEndpoint.Annotations[IdledAtAnnotation] != "" {
 			if project.IsAsleep {
 				glog.V(2).Infof("Force-sleeper: Removing stale idled-at annotation in endpoint( %s ) project( %s )", svc.Name, namespace)
 			} else {
 				glog.V(2).Infof("Auto-idler: Removing stale idled-at annotation in endpoint( %s ) project( %s )", svc.Name, namespace)
 			}
-			delete(newEndpoint.Annotations, unidlingapi.IdledAtAnnotation)
+			delete(newEndpoint.Annotations, IdledAtAnnotation)
 		}
 		projectPods, err := c.GetProjectPods(namespace)
 		if err != nil {
@@ -206,7 +216,7 @@ func AnnotateService(c *cache.Cache, svc *cache.ResourceObject, nowTime time.Tim
 			return err
 		}
 		// Store the scalable resources in a map (this will become an annotation on the service later)
-		scaleRefs := make(map[kapi.ObjectReference]*ControllerScaleReference)
+		scaleRefs := make(map[corev1.ObjectReference]*ControllerScaleReference)
 		for ref := range resourceRefs {
 			scaleRef, err := AnnotateController(c, ref, nowTime, annotation, project.IsAsleep)
 			if err != nil {
@@ -224,12 +234,12 @@ func AnnotateService(c *cache.Cache, svc *cache.ResourceObject, nowTime time.Tim
 			return err
 		}
 
-		epList, err := endpointInterface.List(kapi.ListOptions{})
+		epList, err := endpointInterface.List(metav1.ListOptions{})
 		if err != nil {
 			return err
 		}
 		for _, ep := range epList.Items {
-			_, targetExists := ep.ObjectMeta.Annotations[unidlingapi.UnidleTargetAnnotation]
+			_, targetExists := ep.ObjectMeta.Annotations[UnidleTargetAnnotation]
 			// TODO: It's possible that the unidle target that already exists has a replica that is
 			// not up-to-date.  For instance, a project was *manually* unidled, then scaled.  Then if
 			// the project is auto-idled, the unidle target annotation will hold the replicas of the
@@ -246,7 +256,7 @@ func AnnotateService(c *cache.Cache, svc *cache.ResourceObject, nowTime time.Tim
 				}
 			} else {
 				// Add the scalable resources annotation to the service (endpoint)
-				newEndpoint.Annotations[unidlingapi.UnidleTargetAnnotation] = string(scaleRefsBytes)
+				newEndpoint.Annotations[UnidleTargetAnnotation] = string(scaleRefsBytes)
 			}
 		}
 		_, err = endpointInterface.Update(newEndpoint)
@@ -258,15 +268,15 @@ func AnnotateService(c *cache.Cache, svc *cache.ResourceObject, nowTime time.Tim
 	}
 	var scaleRefs []ControllerScaleReference
 	if annotation == IdledAtAnnotation {
-		endpointInterface := c.KubeClient.Endpoints(namespace)
+		endpointInterface := c.KubeClient.CoreV1().Endpoints(namespace)
 		newEndpoint, err := c.GetAndCopyEndpoint(namespace, svc.Name)
 		if err != nil {
 			return err
 		}
 		// Add the annotation to the endpoint (service) and use the endpoints ScaleRef annotation to find
 		// which controllers need to be annotated
-		newEndpoint.Annotations[unidlingapi.IdledAtAnnotation] = nowTime.Format(time.RFC3339)
-		scaleRefsBytes := newEndpoint.Annotations[unidlingapi.UnidleTargetAnnotation]
+		newEndpoint.Annotations[IdledAtAnnotation] = nowTime.Format(time.RFC3339)
+		scaleRefsBytes := newEndpoint.Annotations[UnidleTargetAnnotation]
 		err = json.Unmarshal([]byte(scaleRefsBytes), &scaleRefs)
 		if err != nil {
 			return err
@@ -278,7 +288,7 @@ func AnnotateService(c *cache.Cache, svc *cache.ResourceObject, nowTime time.Tim
 
 		// Annotate the controllers
 		for _, scaleRef := range scaleRefs {
-			ref := kapi.ObjectReference{
+			ref := corev1.ObjectReference{
 				Name:      scaleRef.Name,
 				Kind:      scaleRef.Kind,
 				Namespace: svc.Namespace,
@@ -293,38 +303,38 @@ func AnnotateService(c *cache.Cache, svc *cache.ResourceObject, nowTime time.Tim
 }
 
 // Add idling annotations to a controller based on the `annotation` parameter
-func AnnotateController(c *cache.Cache, ref kapi.ObjectReference, nowTime time.Time, annotation string, isAsleep bool) (*ControllerScaleReference, error) {
-	obj, err := cache.GetController(ref, c.Factory)
+func AnnotateController(c *cache.Cache, ref corev1.ObjectReference, nowTime time.Time, annotation string, isAsleep bool) (*ControllerScaleReference, error) {
+	obj, err := cache.GetController(ref, c.RESTMapper, c.Config)
 	if err != nil {
 		return nil, err
 	}
 
 	var replicas int32
 	switch controller := obj.(type) {
-	case *deployapi.DeploymentConfig:
-		dcInterface := c.OsClient.DeploymentConfigs(controller.Namespace)
-		copy, err := kapi.Scheme.DeepCopy(controller)
+	case *appsv1.DeploymentConfig:
+		dcInterface := c.OsClient.AppsV1().DeploymentConfigs(controller.Namespace)
+		copy, err := cache.Scheme.DeepCopy(controller)
 		if err != nil {
 			return nil, err
 		}
-		newDC := copy.(*deployapi.DeploymentConfig)
+		newDC := copy.(*appsv1.DeploymentConfig)
 		replicas = controller.Spec.Replicas
 		if newDC.Annotations == nil {
 			newDC.Annotations = make(map[string]string)
 		}
 		switch annotation {
 		case IdledAtAnnotation:
-			newDC.Annotations[unidlingapi.IdledAtAnnotation] = nowTime.Format(time.RFC3339)
+			newDC.Annotations[IdledAtAnnotation] = nowTime.Format(time.RFC3339)
 		case PreviousScaleAnnotation:
-			if newDC.Annotations[unidlingapi.IdledAtAnnotation] != "" {
+			if newDC.Annotations[IdledAtAnnotation] != "" {
 				if isAsleep {
 					glog.V(2).Infof("Force-sleeper: Removing stale idled-at annotation in DC( %s ) project( %s )", newDC.Name, controller.Namespace)
 				} else {
 					glog.V(2).Infof("Auto-idler: Removing stale idled-at annotation in DC( %s ) project( %s )", newDC.Name, controller.Namespace)
 				}
-				delete(newDC.Annotations, unidlingapi.IdledAtAnnotation)
+				delete(newDC.Annotations, IdledAtAnnotation)
 			}
-			newDC.Annotations[unidlingapi.PreviousScaleAnnotation] = fmt.Sprintf("%v", controller.Spec.Replicas)
+			newDC.Annotations[PreviousScaleAnnotation] = fmt.Sprintf("%v", controller.Spec.Replicas)
 		}
 		_, err = dcInterface.Update(newDC)
 		if err != nil {
@@ -335,30 +345,30 @@ func AnnotateController(c *cache.Cache, ref kapi.ObjectReference, nowTime time.T
 			}
 		}
 
-	case *kapi.ReplicationController:
-		rcInterface := c.KubeClient.ReplicationControllers(controller.Namespace)
-		copy, err := kapi.Scheme.DeepCopy(controller)
+	case *corev1.ReplicationController:
+		rcInterface := c.KubeClient.CoreV1().ReplicationControllers(controller.Namespace)
+		copy, err := cache.Scheme.DeepCopy(controller)
 		if err != nil {
 			return nil, err
 		}
-		newRC := copy.(*kapi.ReplicationController)
-		replicas = controller.Spec.Replicas
+		newRC := copy.(*corev1.ReplicationController)
+		replicas = *controller.Spec.Replicas
 		if newRC.Annotations == nil {
 			newRC.Annotations = make(map[string]string)
 		}
 		switch annotation {
 		case IdledAtAnnotation:
-			newRC.Annotations[unidlingapi.IdledAtAnnotation] = nowTime.Format(time.RFC3339)
+			newRC.Annotations[IdledAtAnnotation] = nowTime.Format(time.RFC3339)
 		case PreviousScaleAnnotation:
-			if newRC.Annotations[unidlingapi.IdledAtAnnotation] != "" {
+			if newRC.Annotations[IdledAtAnnotation] != "" {
 				if isAsleep {
 					glog.V(2).Infof("Force-sleeper: Removing stale idled-at annotation in RC( %s ) project( %s )", newRC.Name, controller.Namespace)
 				} else {
 					glog.V(2).Infof("Auto-idler: Removing stale idled-at annotation in RC( %s ) project( %s )", newRC.Name, controller.Namespace)
 				}
-				delete(newRC.Annotations, unidlingapi.IdledAtAnnotation)
+				delete(newRC.Annotations, IdledAtAnnotation)
 			}
-			newRC.Annotations[unidlingapi.PreviousScaleAnnotation] = fmt.Sprintf("%v", controller.Spec.Replicas)
+			newRC.Annotations[PreviousScaleAnnotation] = fmt.Sprintf("%v", controller.Spec.Replicas)
 		}
 
 		_, err = rcInterface.Update(newRC)
@@ -369,9 +379,10 @@ func AnnotateController(c *cache.Cache, ref kapi.ObjectReference, nowTime time.T
 				return nil, err
 			}
 		}
+
 	}
 	return &ControllerScaleReference{
-		Kind:     ref.Kind,
 		Name:     ref.Name,
+		Kind:     ref.Kind,
 		Replicas: replicas}, nil
 }

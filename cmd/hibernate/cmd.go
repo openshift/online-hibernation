@@ -7,20 +7,40 @@ import (
 	"strings"
 	"time"
 
+	osclient "github.com/openshift/client-go/apps/clientset/versioned"
+	"github.com/openshift/client-go/build/clientset/versioned/scheme"
 	"github.com/openshift/online-hibernation/pkg/cache"
 	"github.com/openshift/online-hibernation/pkg/forcesleep"
 	"github.com/openshift/online-hibernation/pkg/idling"
-	_ "github.com/openshift/origin/pkg/api/install"
-	osclient "github.com/openshift/origin/pkg/client"
-	"github.com/openshift/origin/pkg/cmd/util/clientcmd"
 	"github.com/prometheus/client_golang/api/prometheus"
+	"k8s.io/apimachinery/pkg/api/resource"
+	serializer "k8s.io/apimachinery/pkg/runtime/serializer"
+	"k8s.io/client-go/discovery"
+	discocache "k8s.io/client-go/discovery/cached" // Saturday Night Fever
 
 	"github.com/golang/glog"
-	"github.com/spf13/pflag"
-	"k8s.io/kubernetes/pkg/api/resource"
-	"k8s.io/kubernetes/pkg/client/restclient"
-	kclient "k8s.io/kubernetes/pkg/client/unversioned"
+	apimeta "k8s.io/apimachinery/pkg/api/meta"
+	kclient "k8s.io/client-go/kubernetes"
+	restclient "k8s.io/client-go/rest"
 )
+
+func createClients() (*restclient.Config, kclient.Interface, error) {
+	return CreateClientsForConfig()
+}
+
+// CreateClientsForConfig creates and returns OpenShift and Kubernetes clients (as well as other useful
+// client objects) for the given client config.
+func CreateClientsForConfig() (*restclient.Config, kclient.Interface, error) {
+
+	clientConfig, err := restclient.InClusterConfig()
+	if err != nil {
+		glog.V(1).Infof("Error creating in-cluster config: %s", err)
+	}
+
+	clientConfig.NegotiatedSerializer = serializer.DirectCodecFactory{CodecFactory: scheme.Codecs}
+	kc := kclient.NewForConfigOrDie(clientConfig)
+	return clientConfig, kc, err
+}
 
 func main() {
 	log.SetOutput(os.Stdout)
@@ -66,31 +86,18 @@ func main() {
 	}
 
 	//Set up clients
-	var kubeClient kclient.Interface
-	var osClient osclient.Interface
+	restConfig, kubeClient, err := createClients()
+	osClient := osclient.NewForConfigOrDie(restConfig)
 	var prometheusClient prometheus.Client
-
-	config, err := clientcmd.DefaultClientConfig(pflag.NewFlagSet("empty", pflag.ContinueOnError)).ClientConfig()
-	if err != nil {
-		glog.Fatalf("Error creating cluster config: %s", err)
-	}
-	osClient, err = osclient.New(config)
-	if err != nil {
-		glog.Fatalf("Error creating OpenShift client: %s", err)
-	}
-	kubeClient, err = kclient.New(config)
-	if err != nil {
-		glog.Fatalf("Error creating Kubernetes client: %s", err)
-	}
 
 	// @DirectXMan12 should be credited here for helping with the promCfg
 	// Steal the transport from the client config -- it should have the right
 	// certs, token, auth info, etc for connecting to the Prometheus OAuth proxy
-	promClientConfig := *config
+	promClientConfig := restConfig
 	promClientConfig.CAFile = "/var/run/secrets/kubernetes.io/serviceaccount/service-ca.crt"
-	transport, err := restclient.TransportFor(&promClientConfig)
+	transport, err := restclient.TransportFor(promClientConfig)
 	if err != nil {
-		glog.Fatalf("Error creating cluster config: %s", err)
+		glog.Fatalf("Error creating prometheus client config: %s", err)
 	}
 
 	promCfg := prometheus.Config{
@@ -104,8 +111,6 @@ func main() {
 		glog.Fatalf("Error creating Prometheus client: %s", err)
 	}
 
-	factory := clientcmd.New(pflag.NewFlagSet("empty", pflag.ContinueOnError))
-
 	namespaces := strings.Split(excludeNamespaces, ",")
 	exclude := make(map[string]bool)
 	for _, name := range namespaces {
@@ -113,8 +118,13 @@ func main() {
 	}
 	c := make(chan struct{})
 
+	// TODO: switch to an actual retrying RESTMapper when someone gets around to writing it
+	cachedDiscovery := discocache.NewMemCacheClient(kubeClient.Discovery())
+	restMapper := discovery.NewDeferredDiscoveryRESTMapper(cachedDiscovery, apimeta.InterfacesForUnstructured)
+	restMapper.Reset()
+
 	//Cache is a shared object that both Sleeper and Idler will hold a reference to and interact with
-	cache := cache.NewCache(osClient, kubeClient, factory, exclude)
+	cache := cache.NewCache(osClient, kubeClient, restConfig, restMapper, exclude)
 	cache.Run(c)
 
 	sleeperConfig := &forcesleep.SleeperConfig{
@@ -127,9 +137,10 @@ func main() {
 		TermQuota:          tQuota,
 		NonTermQuota:       ntQuota,
 		DryRun:             sleepDryRun,
+		QuotaClient:        kubeClient.CoreV1(),
 	}
 
-	sleeper := forcesleep.NewSleeper(sleeperConfig, factory, cache)
+	sleeper := forcesleep.NewSleeper(sleeperConfig, cache)
 
 	// Spawn metrics server
 	go func() {
@@ -145,7 +156,7 @@ func main() {
 		}
 		err := server.Serve()
 		if err != nil {
-			glog.Errorf("Error running metrics server: %s", err)
+			glog.Errorf("error running metrics server: %s", err)
 		}
 	}()
 
@@ -162,7 +173,7 @@ func main() {
 		ProjectSleepPeriod: projectSleepPeriod,
 	}
 
-	idler := idling.NewIdler(idlerConfig, factory, cache)
+	idler := idling.NewIdler(idlerConfig, cache)
 	idler.Run(c)
 	<-c
 }
