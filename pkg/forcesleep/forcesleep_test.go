@@ -9,7 +9,6 @@ import (
 
 	fakeoclientset "github.com/openshift/client-go/apps/clientset/versioned/fake"
 	"github.com/openshift/online-hibernation/pkg/cache"
-	fakecache "github.com/openshift/online-hibernation/pkg/cache/fake"
 
 	appsv1 "github.com/openshift/api/apps/v1"
 
@@ -19,9 +18,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
-	"k8s.io/client-go/discovery"
 	fakekclientset "k8s.io/client-go/kubernetes/fake"
-	"k8s.io/client-go/kubernetes/scheme"
 	restclient "k8s.io/client-go/rest"
 	ktesting "k8s.io/client-go/testing"
 )
@@ -44,7 +41,7 @@ func TestSyncProject(t *testing.T) {
 		ProjectSleepPeriod       string
 		TermQuota                string
 		NonTermQuota             string
-		Projects                 []string
+		Projects                 []*corev1.Namespace
 		DeploymentConfigs        []*appsv1.DeploymentConfig
 		Pods                     []*corev1.Pod
 		ReplicationControllers   []*corev1.ReplicationController
@@ -60,9 +57,9 @@ func TestSyncProject(t *testing.T) {
 			TermQuota:          "1G",
 			NonTermQuota:       "1G",
 			DryRun:             false,
-			Projects:           []string{"test"},
-			ResourceQuotas: []*corev1.ResourceQuota{
-				quota("compute-resources", "test", "1G", "1"),
+			ResourceQuotas:     []*corev1.ResourceQuota{},
+			Projects: []*corev1.Namespace{
+				project("test"),
 			},
 			Pods: []*corev1.Pod{
 				pod("pod1", "test"),
@@ -104,9 +101,9 @@ func TestSyncProject(t *testing.T) {
 			TermQuota:          "1G",
 			NonTermQuota:       "1G",
 			DryRun:             true,
-			Projects:           []string{"test"},
-			ResourceQuotas: []*corev1.ResourceQuota{
-				quota("compute-resources", "test", "1G", "1"),
+			ResourceQuotas:     []*corev1.ResourceQuota{},
+			Projects: []*corev1.Namespace{
+				project("test"),
 			},
 			Pods: []*corev1.Pod{
 				pod("pod1", "test"),
@@ -139,9 +136,9 @@ func TestSyncProject(t *testing.T) {
 			TermQuota:          "1G",
 			NonTermQuota:       "1G",
 			DryRun:             true,
-			Projects:           []string{"test"},
-			ResourceQuotas: []*corev1.ResourceQuota{
-				quota("compute-resources", "test", "1G", "1"),
+			ResourceQuotas:     []*corev1.ResourceQuota{},
+			Projects: []*corev1.Namespace{
+				project("test"),
 			},
 			Pods: []*corev1.Pod{
 				pod("pod1", "test"),
@@ -174,10 +171,11 @@ func TestSyncProject(t *testing.T) {
 			TermQuota:          "1G",
 			NonTermQuota:       "1G",
 			DryRun:             false,
-			Projects:           []string{"test"},
 			ResourceQuotas: []*corev1.ResourceQuota{
-				quota("compute-resources", "test", "1G", "1"),
 				quota("force-sleep", "test", "1G", "0"),
+			},
+			Projects: []*corev1.Namespace{
+				project("test"),
 			},
 			Pods: []*corev1.Pod{},
 			ReplicationControllers: []*corev1.ReplicationController{
@@ -207,10 +205,11 @@ func TestSyncProject(t *testing.T) {
 			TermQuota:          "1G",
 			NonTermQuota:       "1G",
 			DryRun:             false,
-			Projects:           []string{"test"},
 			ResourceQuotas: []*corev1.ResourceQuota{
-				quota("compute-resources", "test", "1G", "1"),
 				quota("force-sleep", "test", "1G", "0"),
+			},
+			Projects: []*corev1.Namespace{
+				project("test"),
 			},
 			Pods: []*corev1.Pod{},
 			ReplicationControllers: []*corev1.ReplicationController{
@@ -244,9 +243,9 @@ func TestSyncProject(t *testing.T) {
 			TermQuota:          "1G",
 			NonTermQuota:       "1G",
 			DryRun:             false,
-			Projects:           []string{"test"},
-			ResourceQuotas: []*corev1.ResourceQuota{
-				quota("compute-resources", "test", "1G", "2"),
+			ResourceQuotas:     []*corev1.ResourceQuota{},
+			Projects: []*corev1.Namespace{
+				project("test"),
 			},
 			Pods: []*corev1.Pod{
 				pod("pod1", "test"),
@@ -297,9 +296,9 @@ func TestSyncProject(t *testing.T) {
 			TermQuota:          "1G",
 			NonTermQuota:       "1G",
 			DryRun:             false,
-			Projects:           []string{"test"},
-			ResourceQuotas: []*corev1.ResourceQuota{
-				quota("compute-resources", "test", "1G", "2"),
+			ResourceQuotas:     []*corev1.ResourceQuota{},
+			Projects: []*corev1.Namespace{
+				project("test"),
 			},
 			Pods: []*corev1.Pod{
 				pod("pod1", "test"),
@@ -332,11 +331,8 @@ func TestSyncProject(t *testing.T) {
 			ProjectSleepPeriod: "8h",
 			TermQuota:          "1G",
 			NonTermQuota:       "1G",
-			Projects:           []string{"test"},
-			ResourceQuotas: []*corev1.ResourceQuota{
-				quota("compute-resources", "test", "1G", "2"),
-			},
-			Pods: []*corev1.Pod{},
+			ResourceQuotas:     []*corev1.ResourceQuota{},
+			Pods:               []*corev1.Pod{},
 			ReplicationControllers: []*corev1.ReplicationController{
 				rc("rc1", "test"),
 			},
@@ -361,9 +357,9 @@ func TestSyncProject(t *testing.T) {
 			TermQuota:          "1G",
 			NonTermQuota:       "1G",
 			DryRun:             false,
-			Projects:           []string{"test"},
-			ResourceQuotas: []*corev1.ResourceQuota{
-				quota("compute-resources", "test", "1G", "1"),
+			ResourceQuotas:     []*corev1.ResourceQuota{},
+			Projects: []*corev1.Namespace{
+				project("test"),
 			},
 			Pods: []*corev1.Pod{
 				pod("pod1", "test"),
@@ -381,15 +377,22 @@ func TestSyncProject(t *testing.T) {
 						time.Time{}),
 				}),
 				podResource("pod1", "pod1", "test", "1",
-					resource.MustParse("1M"),
+					resource.MustParse("1G"),
 					[]*cache.RunningTime{
 						runningTime(time.Now().Add(-16*time.Hour), time.Time{}),
 					}),
 			},
-			ExpectedOpenshiftActions: []action{},
-			ExpectedKubeActions:      []action{
-			//{Verb: "get", Resource: "replicationcontrollers"},
-			//{Verb: "get", Resource: "replicationcontrollers"},
+			ExpectedOpenshiftActions: []action{
+				{Verb: "list", Resource: "deploymentconfigs"},
+			},
+			ExpectedKubeActions: []action{
+				{Verb: "get", Resource: "namespaces", Name: "test"},
+				{Verb: "update", Resource: "namespaces", Name: "test"},
+				{Verb: "create", Resource: "resourcequotas", Name: "force-sleep"},
+				{Verb: "delete", Resource: "pods", Name: "pod1"},
+				{Verb: "list", Resource: "pods"},
+				{Verb: "list", Resource: "replicationcontrollers"},
+				{Verb: "update", Resource: "replicationcontrollers", Name: "rc1"},
 			},
 		},
 
@@ -400,9 +403,11 @@ func TestSyncProject(t *testing.T) {
 			TermQuota:          "1G",
 			NonTermQuota:       "1G",
 			DryRun:             false,
-			Projects:           []string{"test"},
 			ResourceQuotas: []*corev1.ResourceQuota{
 				quota("compute-resources", "test", "1G", "2"),
+			},
+			Projects: []*corev1.Namespace{
+				project("test"),
 			},
 			Pods: []*corev1.Pod{
 				pod("pod1", "test"),
@@ -426,16 +431,24 @@ func TestSyncProject(t *testing.T) {
 						time.Time{}),
 				}),
 				podResource("pod1", "pod1", "test", "1",
-					resource.MustParse("1M"),
+					resource.MustParse("1G"),
 					[]*cache.RunningTime{
 						runningTime(time.Now().Add(-16*time.Hour), time.Time{}),
 					}),
 			},
-			ExpectedOpenshiftActions: []action{},
-			ExpectedKubeActions:      []action{
-			//{Verb: "get", Resource: "replicationcontrollers", Name: "rc1"},
-			//{Verb: "get", Resource: "replicationcontrollers", Name: "rc2"},
-			//{Verb: "update", Resource: "replicationcontrollers"},
+			ExpectedOpenshiftActions: []action{
+				{Verb: "list", Resource: "deploymentconfigs"},
+			},
+			ExpectedKubeActions: []action{
+				{Verb: "get", Resource: "namespaces", Name: "test"},
+				{Verb: "list", Resource: "replicationcontrollers"},
+				{Verb: "create", Resource: "resourcequotas", Name: "force-sleep"},
+				{Verb: "delete", Resource: "pods", Name: "pod1"},
+				{Verb: "delete", Resource: "pods", Name: "pod2"},
+				{Verb: "list", Resource: "pods"},
+				{Verb: "update", Resource: "namespaces", Name: "test"},
+				{Verb: "update", Resource: "replicationcontrollers"},
+				{Verb: "update", Resource: "replicationcontrollers"},
 			},
 		},
 	}
@@ -467,6 +480,13 @@ func TestSyncProject(t *testing.T) {
 			DryRun:             test.DryRun,
 			QuotaClient:        kc.CoreV1(),
 		}
+		kc.AddReactor("list", "namespaces", func(action ktesting.Action) (handled bool, ret runtime.Object, err error) {
+			list := &corev1.NamespaceList{}
+			for i := range test.Projects {
+				list.Items = append(list.Items, *test.Projects[i])
+			}
+			return true, list, nil
+		})
 		kc.AddReactor("list", "resourcequotas", func(action ktesting.Action) (handled bool, ret runtime.Object, err error) {
 			list := &corev1.ResourceQuotaList{}
 			for i := range test.ResourceQuotas {
@@ -497,7 +517,6 @@ func TestSyncProject(t *testing.T) {
 			return true, list, nil
 		})
 
-		// TODO: Fix this for deploymentconfigs "update"
 		oc.AddReactor("list", "deploymentconfigs", func(action ktesting.Action) (handled bool, ret runtime.Object, err error) {
 			list := &appsv1.DeploymentConfigList{}
 			for i := range test.DeploymentConfigs {
@@ -516,15 +535,10 @@ func TestSyncProject(t *testing.T) {
 		clientConfig := &restclient.Config{
 			Host: "127.0.0.1",
 			ContentConfig: restclient.ContentConfig{GroupVersion: &corev1.SchemeGroupVersion,
-				NegotiatedSerializer: scheme.Codecs},
+				NegotiatedSerializer: cache.Codecs},
 		}
 
-		cachedDiscovery := fakecache.FakeCachedDiscoveryInterface{}
-
-		restMapper := discovery.NewDeferredDiscoveryRESTMapper(&cachedDiscovery, nil)
-		restMapper.Reset()
-
-		rcache := cache.NewCache(oc, kc, clientConfig, restMapper, exclude)
+		rcache := cache.NewCache(oc, kc, clientConfig, nil, exclude)
 		s := NewSleeper(config, rcache)
 
 		for _, resource := range test.Resources {
@@ -532,11 +546,13 @@ func TestSyncProject(t *testing.T) {
 			if err != nil {
 				t.Logf("Error: %s", err)
 			}
-
 		}
-
-		for _, project := range test.Projects {
-			s.syncProject(project)
+		projects, err := s.resources.Indexer.ByIndex("ofKind", cache.ProjectKind)
+		if err != nil {
+			t.Logf("Error: %s", err)
+		}
+		for _, project := range projects {
+			s.syncProject(project.(*cache.ResourceObject).Name)
 		}
 
 		// Test kubeClient actions
@@ -767,6 +783,17 @@ func TestSyncProject(t *testing.T) {
 				t.FailNow()
 			}
 		}
+	}
+}
+
+func project(name string) *corev1.Namespace {
+	return &corev1.Namespace{
+		TypeMeta: metav1.TypeMeta{
+			Kind: "Namespace",
+		},
+		ObjectMeta: metav1.ObjectMeta{
+			Name: name,
+		},
 	}
 }
 

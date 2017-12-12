@@ -24,10 +24,12 @@ import (
 	kcache "k8s.io/client-go/tools/cache"
 
 	appsscheme "github.com/openshift/client-go/apps/clientset/versioned/scheme"
+	serializer "k8s.io/apimachinery/pkg/runtime/serializer"
 	kscheme "k8s.io/client-go/kubernetes/scheme"
 )
 
 var Scheme = runtime.NewScheme()
+var Codecs = serializer.NewCodecFactory(Scheme)
 
 func init() {
 	kscheme.AddToScheme(Scheme)
@@ -35,16 +37,14 @@ func init() {
 }
 
 const (
-	PodKind                   = "Pod"
-	RCKind                    = "ReplicationController"
-	DCKind                    = "DeploymentConfig"
-	ServiceKind               = "Service"
-	ProjectKind               = "Namespace"
-	ComputeQuotaName          = "compute-resources"
-	ComputeTimeboundQuotaName = "compute-resources-timebound"
-	ProjectSleepQuotaName     = "force-sleep"
-	OpenShiftDCName           = "openshift.io/deployment-config.name"
-	BuildAnnotation           = "openshift.io/build.name"
+	PodKind               = "Pod"
+	RCKind                = "ReplicationController"
+	DCKind                = "DeploymentConfig"
+	ServiceKind           = "Service"
+	ProjectKind           = "Namespace"
+	ProjectSleepQuotaName = "force-sleep"
+	OpenShiftDCName       = "openshift.io/deployment-config.name"
+	BuildAnnotation       = "openshift.io/build.name"
 )
 
 type ResourceIndexer interface {

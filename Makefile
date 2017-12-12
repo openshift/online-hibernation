@@ -20,18 +20,6 @@ build: check-gopath
 		-o $(OUT_DIR)/$(ARCH)/hibernate github.com/openshift/online-hibernation/cmd/hibernate
 .PHONY: build
 
-
-# Runs the integration tests.
-#
-# Args:
-#   TESTFLAGS: Flags to pass to `go test`. The `-v` argument is always passed.
-#
-# Examples:
-#   make test-integration TESTFLAGS="-run TestSomething"
-test-integration: build
-	go test -v $(TESTFLAGS) \
-		github.com/openshift/online-hibernation/pkg/forcesleep...
-
 .PHONY: test
 # Runs the unit tests.
 #
@@ -42,7 +30,7 @@ test-integration: build
 #   make test TESTFLAGS="-run TestSomething"
 test: build
 	go test -v $(TESTFLAGS) \
-		github.com/openshift/online-hibernation/pkg/cache/... github.com/openshift/online-hibernation/pkg/idling/...
+		github.com/openshift/online-hibernation/pkg/cache/... github.com/openshift/online-hibernation/pkg/forcesleep/... github.com/openshift/online-hibernation/pkg/idling/...
 .PHONY: test
 
 
