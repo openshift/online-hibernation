@@ -7,7 +7,6 @@ import (
 	"time"
 
 	"github.com/openshift/online-hibernation/pkg/cache"
-	fakecache "github.com/openshift/online-hibernation/pkg/cache/fake"
 
 	appsv1 "github.com/openshift/api/apps/v1"
 	fakeoclientset "github.com/openshift/client-go/apps/clientset/versioned/fake"
@@ -15,13 +14,11 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/client-go/discovery"
 
 	"k8s.io/apimachinery/pkg/api/resource"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	fakekclientset "k8s.io/client-go/kubernetes/fake"
-	"k8s.io/client-go/kubernetes/scheme"
 	restclient "k8s.io/client-go/rest"
 	ktesting "k8s.io/client-go/testing"
 	"k8s.io/client-go/util/workqueue"
@@ -321,15 +318,11 @@ func TestSync(t *testing.T) {
 		clientConfig := &restclient.Config{
 			Host: "127.0.0.1",
 			ContentConfig: restclient.ContentConfig{GroupVersion: &corev1.SchemeGroupVersion,
-				NegotiatedSerializer: scheme.Codecs},
+				NegotiatedSerializer: cache.Codecs},
 		}
 		fakeOClient := fakeoclientset.NewSimpleClientset()
 		fakeClient := &fakekclientset.Clientset{}
 
-		cachedDiscovery := fakecache.FakeCachedDiscoveryInterface{}
-
-		restMapper := discovery.NewDeferredDiscoveryRESTMapper(&cachedDiscovery, nil)
-		restMapper.Reset()
 		fakeOClient.AddReactor("list", "deploymentconfigs", func(action ktesting.Action) (handled bool, ret runtime.Object, err error) {
 			list := &appsv1.DeploymentConfigList{}
 			for i := range test.deploymentConfigs {
@@ -362,7 +355,7 @@ func TestSync(t *testing.T) {
 			return true, list, nil
 		})
 
-		fakeCache := cache.NewCache(fakeOClient, fakeClient, clientConfig, restMapper, exclude)
+		fakeCache := cache.NewCache(fakeOClient, fakeClient, clientConfig, nil, exclude)
 		idler := NewIdler(config, fakeCache)
 		for _, resource := range test.resources {
 			err := idler.resources.Indexer.AddResourceObject(resource)

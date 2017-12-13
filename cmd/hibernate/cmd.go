@@ -8,7 +8,6 @@ import (
 	"time"
 
 	osclient "github.com/openshift/client-go/apps/clientset/versioned"
-	"github.com/openshift/client-go/build/clientset/versioned/scheme"
 	"github.com/openshift/online-hibernation/pkg/cache"
 	"github.com/openshift/online-hibernation/pkg/forcesleep"
 	"github.com/openshift/online-hibernation/pkg/idling"
@@ -37,7 +36,7 @@ func CreateClientsForConfig() (*restclient.Config, kclient.Interface, error) {
 		glog.V(1).Infof("Error creating in-cluster config: %s", err)
 	}
 
-	clientConfig.NegotiatedSerializer = serializer.DirectCodecFactory{CodecFactory: scheme.Codecs}
+	clientConfig.NegotiatedSerializer = serializer.DirectCodecFactory{CodecFactory: cache.Codecs}
 	kc := kclient.NewForConfigOrDie(clientConfig)
 	return clientConfig, kc, err
 }
