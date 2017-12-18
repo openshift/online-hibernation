@@ -8,9 +8,9 @@ import (
 
 	fakeoclientset "github.com/openshift/client-go/apps/clientset/versioned/fake"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/api/extensions/v1beta1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	//fakekclientset "k8s.io/client-go/kubernetes/fake"
 	fakekclientset "k8s.io/client-go/kubernetes/fake"
 
 	ktesting "k8s.io/client-go/testing"
@@ -27,6 +27,7 @@ func setupClients(t *testing.T) (*fakekclientset.Clientset, *fakeoclientset.Clie
 	deltime := &deltimeunver
 	fakeOClient := fakeoclientset.NewSimpleClientset()
 	fakeClient := &fakekclientset.Clientset{}
+
 	fakeClient.AddReactor("list", "services", func(action ktesting.Action) (handled bool, resp runtime.Object, err error) {
 		obj := &corev1.ServiceList{
 			Items: []corev1.Service{
@@ -93,6 +94,30 @@ func setupClients(t *testing.T) (*fakekclientset.Clientset, *fakeoclientset.Clie
 						Phase: corev1.NamespaceTerminating,
 					},
 				},
+				{
+					TypeMeta: metav1.TypeMeta{
+						Kind:       "Namespace",
+						APIVersion: "v1",
+					},
+					ObjectMeta: metav1.ObjectMeta{
+						Name: "somens3",
+					},
+					Status: corev1.NamespaceStatus{
+						Phase: corev1.NamespaceActive,
+					},
+				},
+				{
+					TypeMeta: metav1.TypeMeta{
+						Kind:       "Namespace",
+						APIVersion: "v1",
+					},
+					ObjectMeta: metav1.ObjectMeta{
+						Name: "somens4",
+					},
+					Status: corev1.NamespaceStatus{
+						Phase: corev1.NamespaceActive,
+					},
+				},
 			},
 		}
 
@@ -150,6 +175,55 @@ func setupClients(t *testing.T) (*fakekclientset.Clientset, *fakeoclientset.Clie
 		return true, obj, nil
 	})
 
+	fakeClient.AddReactor("list", "replicasets", func(action ktesting.Action) (handled bool, resp runtime.Object, err error) {
+		obj := &v1beta1.ReplicaSetList{
+			Items: []v1beta1.ReplicaSet{
+				{
+					TypeMeta: metav1.TypeMeta{
+						Kind:       "ReplicaSet",
+						APIVersion: "v1",
+					},
+					ObjectMeta: metav1.ObjectMeta{
+						Name:              "somers1",
+						Namespace:         "somens3",
+						UID:               "3345",
+						ResourceVersion:   "1",
+						DeletionTimestamp: deltime,
+						Labels:            map[string]string{"somerslabel": "rssomething"},
+					},
+					Spec: v1beta1.ReplicaSetSpec{
+						Selector: &metav1.LabelSelector{MatchLabels: (map[string]string{"somersselector": "rsblah"})},
+					},
+					Status: v1beta1.ReplicaSetStatus{
+						Replicas: 1,
+					},
+				},
+				{
+					TypeMeta: metav1.TypeMeta{
+						Kind:       "ReplicaSet",
+						APIVersion: "v1",
+					},
+					ObjectMeta: metav1.ObjectMeta{
+						Name:              "somers2",
+						Namespace:         "somens4",
+						UID:               "4456",
+						ResourceVersion:   "1",
+						DeletionTimestamp: deltime,
+						Labels:            map[string]string{"anotherrslabel": "rsanother"},
+					},
+					Spec: v1beta1.ReplicaSetSpec{
+						Selector: &metav1.LabelSelector{MatchLabels: (map[string]string{"anotherrsselector": "rsblahblah"})},
+					},
+					Status: v1beta1.ReplicaSetStatus{
+						Replicas: 1,
+					},
+				},
+			},
+		}
+
+		return true, obj, nil
+	})
+
 	fakeClient.AddReactor("list", "pods", func(action ktesting.Action) (handled bool, resp runtime.Object, err error) {
 		obj := &corev1.PodList{
 			Items: []corev1.Pod{
@@ -195,6 +269,66 @@ func setupClients(t *testing.T) (*fakekclientset.Clientset, *fakeoclientset.Clie
 						DeletionTimestamp: deltime,
 						Labels:            map[string]string{"anotherpodlabel": "podsomethingelse"},
 						Annotations:       map[string]string{OpenShiftDCName: "anotherpoddc"},
+					},
+					Spec: corev1.PodSpec{
+						RestartPolicy:         corev1.RestartPolicyAlways,
+						ActiveDeadlineSeconds: nil,
+						Containers: []corev1.Container{
+							{
+								Resources: corev1.ResourceRequirements{
+									Requests: corev1.ResourceList{
+										"memory": resource.MustParse("0"),
+									},
+								},
+							},
+						},
+					},
+					Status: corev1.PodStatus{
+						Phase: corev1.PodUnknown,
+					},
+				},
+				{
+					TypeMeta: metav1.TypeMeta{
+						Kind:       "Pod",
+						APIVersion: "v1",
+					},
+					ObjectMeta: metav1.ObjectMeta{
+						Name:              "somepod3",
+						Namespace:         "somens3",
+						UID:               "2211",
+						DeletionTimestamp: deltime,
+						Labels:            map[string]string{"yetanotherpodlabel": "podsomethingelseagain"},
+						Annotations:       map[string]string{},
+					},
+					Spec: corev1.PodSpec{
+						RestartPolicy:         corev1.RestartPolicyAlways,
+						ActiveDeadlineSeconds: nil,
+						Containers: []corev1.Container{
+							{
+								Resources: corev1.ResourceRequirements{
+									Requests: corev1.ResourceList{
+										"memory": resource.MustParse("0"),
+									},
+								},
+							},
+						},
+					},
+					Status: corev1.PodStatus{
+						Phase: corev1.PodRunning,
+					},
+				},
+				{
+					TypeMeta: metav1.TypeMeta{
+						Kind:       "Pod",
+						APIVersion: "v1",
+					},
+					ObjectMeta: metav1.ObjectMeta{
+						Name:              "somepod4",
+						Namespace:         "somens4",
+						UID:               "2211",
+						DeletionTimestamp: deltime,
+						Labels:            map[string]string{"yetanotherpodlabelagain": "podsomethingelseagainandagain"},
+						Annotations:       map[string]string{},
 					},
 					Spec: corev1.PodSpec{
 						RestartPolicy:         corev1.RestartPolicyAlways,
@@ -285,6 +419,14 @@ func TestReplaceWithMultipleDoesNotConflict(t *testing.T) {
 			return fakeClient.CoreV1().ReplicationControllers(corev1.NamespaceAll).Watch(options)
 		},
 	}
+	rsLW := &kcache.ListWatch{
+		ListFunc: func(options metav1.ListOptions) (runtime.Object, error) {
+			return fakeClient.ExtensionsV1beta1().ReplicaSets(corev1.NamespaceAll).List(options)
+		},
+		WatchFunc: func(options metav1.ListOptions) (watch.Interface, error) {
+			return fakeClient.ExtensionsV1beta1().ReplicaSets(corev1.NamespaceAll).Watch(options)
+		},
+	}
 	podLW := &kcache.ListWatch{
 		ListFunc: func(options metav1.ListOptions) (runtime.Object, error) {
 			return fakeClient.CoreV1().Pods(corev1.NamespaceAll).List(options)
@@ -308,6 +450,8 @@ func TestReplaceWithMultipleDoesNotConflict(t *testing.T) {
 	go nsr.Run(c)
 	rcr := kcache.NewReflector(rcLW, &corev1.ReplicationController{}, store, 0)
 	go rcr.Run(c)
+	rsr := kcache.NewReflector(rsLW, &v1beta1.ReplicaSet{}, store, 0)
+	go rsr.Run(c)
 	podr := kcache.NewReflector(podLW, &corev1.Pod{}, store, 0)
 	go podr.Run(c)
 	time.Sleep(1 * time.Second)
@@ -349,7 +493,6 @@ func TestReplaceWithMultipleDoesNotConflict(t *testing.T) {
 			Namespace:         "somens1",
 			Kind:              RCKind,
 			ResourceVersion:   "1",
-			DeploymentConfig:  "somedc",
 			DeletionTimestamp: deltime,
 			Selectors:         selector,
 			Labels:            map[string]string{"somerclabel": "rcsomething"},
@@ -360,10 +503,40 @@ func TestReplaceWithMultipleDoesNotConflict(t *testing.T) {
 		assert.Equal(t, resource.Namespace, rcs[0].(*ResourceObject).Namespace, "expected the rc somerc1 to be converted to a resource object properly")
 		assert.Equal(t, resource.Kind, rcs[0].(*ResourceObject).Kind, "expected the rc somerc1 to be converted to a resource object properly")
 		assert.Equal(t, resource.ResourceVersion, rcs[0].(*ResourceObject).ResourceVersion, "expected the rc somerc1 to be converted to a resource object properly")
-		assert.Equal(t, resource.DeploymentConfig, rcs[0].(*ResourceObject).DeploymentConfig, "expected the rc somerc1 to be converted to a resource object properly")
 		assert.Equal(t, resource.DeletionTimestamp, rcs[0].(*ResourceObject).DeletionTimestamp, "expected the rc somerc1 to be converted to a resource object properly")
 		assert.Equal(t, resource.Selectors, rcs[0].(*ResourceObject).Selectors, "expected the rc somerc1 to be converted to a resource object properly")
 		assert.Equal(t, resource.Labels, rcs[0].(*ResourceObject).Labels, "expected the rc somerc1 to be converted to a resource object properly")
+	}
+
+	rss, err := store.ByIndex("byNamespaceAndKind", "somens3/"+RSKind)
+	if err != nil {
+		t.Fatalf("unexpected error: %v")
+	}
+
+	if assert.Len(t, rss, 1, "expected to have one rs in namespace somens3") {
+		selector, err := metav1.LabelSelectorAsSelector(&metav1.LabelSelector{MatchLabels: map[string]string{"somersselector": "rsblah"}})
+		if err != nil {
+			t.Fatalf("unexpected error: %v")
+		}
+		resource := &ResourceObject{
+			UID:               "3345",
+			Name:              "somers1",
+			Namespace:         "somens3",
+			Kind:              RSKind,
+			ResourceVersion:   "1",
+			DeletionTimestamp: deltime,
+			Selectors:         selector,
+			Labels:            map[string]string{"somerslabel": "rssomething"},
+		}
+		assert.NotNil(t, rss[0].(*ResourceObject).RunningTimes, "expected the rs somers1 to be converted to a resource object properly, found nil RunningTime")
+		assert.Equal(t, resource.UID, rss[0].(*ResourceObject).UID, "expected the rs somers1 to be converted to a resource object properly")
+		assert.Equal(t, resource.Name, rss[0].(*ResourceObject).Name, "expected the rs somers1 to be converted to a resource object properly")
+		assert.Equal(t, resource.Namespace, rss[0].(*ResourceObject).Namespace, "expected the rs somers1 to be converted to a resource object properly")
+		assert.Equal(t, resource.Kind, rss[0].(*ResourceObject).Kind, "expected the rs somers1 to be converted to a resource object properly")
+		assert.Equal(t, resource.ResourceVersion, rss[0].(*ResourceObject).ResourceVersion, "expected the rs somers1 to be converted to a resource object properly")
+		assert.Equal(t, resource.DeletionTimestamp, rss[0].(*ResourceObject).DeletionTimestamp, "expected the rs somers1 to be converted to a resource object properly")
+		assert.Equal(t, resource.Selectors, rss[0].(*ResourceObject).Selectors, "expected the rs somers1 to be converted to a resource object properly")
+		assert.Equal(t, resource.Labels, rss[0].(*ResourceObject).Labels, "expected the rs somers1 to be converted to a resource object properly")
 	}
 
 	pods, err := store.ByIndex("byNamespaceAndKind", "somens1/"+PodKind)
@@ -391,6 +564,33 @@ func TestReplaceWithMultipleDoesNotConflict(t *testing.T) {
 		assert.Equal(t, resource.Annotations, pods[0].(*ResourceObject).Annotations, "expected the pod somepod1 to be converted to a resource object properly")
 		assert.Equal(t, resource.DeletionTimestamp, pods[0].(*ResourceObject).DeletionTimestamp, "expected the pod somepod1 to be converted to a resource object properly")
 		assert.Equal(t, resource.Labels, pods[0].(*ResourceObject).Labels, "expected the pod somepod1 to be converted to a resource object properly")
+	}
+
+	rspods, err := store.ByIndex("byNamespaceAndKind", "somens3/"+PodKind)
+	if err != nil {
+		t.Fatalf("unexpected error: %v")
+	}
+
+	if assert.Len(t, pods, 1, "expected to have one pod in namespace somens3") {
+		resource := &ResourceObject{
+			UID:               "2211",
+			Name:              "somepod3",
+			Namespace:         "somens3",
+			Kind:              PodKind,
+			Terminating:       true,
+			DeletionTimestamp: deltime,
+			Labels:            map[string]string{"yetanotherpodlabel": "podsomethingelseagain"},
+			Annotations:       map[string]string{},
+		}
+		assert.NotNil(t, rspods[0].(*ResourceObject).RunningTimes, "expected the pod somepod3 to be converted to a resource object properly, found nil RunningTime")
+		assert.NotNil(t, rspods[0].(*ResourceObject).MemoryRequested, "expected the pod somepod3 to be converted to a resource object properly, found nil RunningTime")
+		assert.Equal(t, resource.UID, rspods[0].(*ResourceObject).UID, "expected the pod somepod3 to be converted to a resource object properly")
+		assert.Equal(t, resource.Name, rspods[0].(*ResourceObject).Name, "expected the pod somepod3 to be converted to a resource object properly")
+		assert.Equal(t, resource.Namespace, rspods[0].(*ResourceObject).Namespace, "expected the pod somepod3 to be converted to a resource object properly")
+		assert.Equal(t, resource.Kind, rspods[0].(*ResourceObject).Kind, "expected the pod somepod3 to be converted to a resource object properly")
+		assert.Equal(t, resource.Annotations, rspods[0].(*ResourceObject).Annotations, "expected the pod somepod3 to be converted to a resource object properly")
+		assert.Equal(t, resource.DeletionTimestamp, rspods[0].(*ResourceObject).DeletionTimestamp, "expected the pod somepod3 to be converted to a resource object properly")
+		assert.Equal(t, resource.Labels, rspods[0].(*ResourceObject).Labels, "expected the pod somepod3 to be converted to a resource object properly")
 	}
 
 	nses, err := store.ByIndex("getProject", "somens1")

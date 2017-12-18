@@ -1,13 +1,14 @@
 package cache
 
 import (
-	"encoding/json"
 	"fmt"
 
 	"github.com/golang/glog"
 	"github.com/openshift/api/apps/v1"
 	osclient "github.com/openshift/client-go/apps/clientset/versioned"
 	appsv1 "github.com/openshift/client-go/apps/clientset/versioned/typed/apps/v1"
+	"k8s.io/api/extensions/v1beta1"
+	extkclientv1beta1 "k8s.io/client-go/kubernetes/typed/extensions/v1beta1"
 
 	corev1 "k8s.io/api/core/v1"
 	kerrors "k8s.io/apimachinery/pkg/api/errors"
@@ -40,6 +41,8 @@ const (
 	PodKind               = "Pod"
 	RCKind                = "ReplicationController"
 	DCKind                = "DeploymentConfig"
+	RSKind                = "ReplicaSet"
+	DepKind               = "Deployment"
 	ServiceKind           = "Service"
 	ProjectKind           = "Namespace"
 	ProjectSleepQuotaName = "force-sleep"
@@ -113,6 +116,8 @@ func (c *Cache) GetProject(namespace string) (*ResourceObject, error) {
 
 // Takes in a list of locally cached Pod ResourceObjects and a Service ResourceObject
 // Compares selector labels on the pods and services to check for any matches which link the two
+// Pod label must match service selector to link the two
+// TODO: Best way to find pods for service?
 func (c *Cache) GetPodsForService(svc *ResourceObject, podList []interface{}) map[string]runtime.Object {
 	pods := make(map[string]runtime.Object)
 	for _, obj := range podList {
@@ -168,37 +173,24 @@ func (c *Cache) FindScalableResourcesForService(pods map[string]runtime.Object) 
 	return controllerRefs, nil
 }
 
-// Returns an ObjectReference to the parent controller (RC/DC) for a resource
+// Returns an ObjectReference to the parent controller (RC/DC/RS/Deployment) for a resource
 func GetControllerRef(obj runtime.Object) (*corev1.ObjectReference, error) {
 	objMeta, err := meta.Accessor(obj)
 	if err != nil {
 		return nil, err
 	}
-
-	annotations := objMeta.GetAnnotations()
-
-	creatorRefRaw, creatorListed := annotations[corev1.CreatedByAnnotation]
-	if !creatorListed {
-		// if we don't have a creator listed, try the openshift-specific Deployment annotation
-		// TODO: fix this, shouldn't have to depend on annotation?
-		dcName, dcNameListed := annotations[OpenShiftDCName]
-		if !dcNameListed {
-			return nil, nil
-		}
-
+	ownerRef := objMeta.GetOwnerReferences()
+	var ref metav1.OwnerReference
+	if len(ownerRef) != 0 {
+		ref = ownerRef[0]
 		return &corev1.ObjectReference{
-			Name:      dcName,
+			Name:      ref.Name,
 			Namespace: objMeta.GetNamespace(),
-			Kind:      DCKind,
+			Kind:      ref.Kind,
 		}, nil
+	} else {
+		return nil, nil
 	}
-
-	serializedRef := &corev1.SerializedReference{}
-	err = json.Unmarshal([]byte(creatorRefRaw), serializedRef)
-	if err != nil {
-		return nil, err
-	}
-	return &serializedRef.Reference, nil
 }
 
 // Returns a generic runtime.Object for a controller
@@ -209,10 +201,13 @@ func GetController(ref corev1.ObjectReference, restMapper apimeta.RESTMapper, re
 	if err != nil {
 		return nil, err
 	}
-
-	if ref.Kind == DCKind {
+	switch ref.Kind {
+	case DCKind:
 		gv = v1.SchemeGroupVersion
+	case DepKind, RSKind:
+		gv = v1beta1.SchemeGroupVersion
 	}
+
 	mapping, err := restMapper.RESTMapping(schema.GroupKind{Group: gv.Group, Kind: ref.Kind})
 	if err != nil {
 		return nil, err
@@ -229,6 +224,20 @@ func GetController(ref corev1.ObjectReference, restMapper apimeta.RESTMapper, re
 		oc := appsv1.NewForConfigOrDie(&newConfig)
 		oclient := oc.RESTClient()
 		req := oclient.Get().
+			NamespaceIfScoped(ref.Namespace, mapping.Scope.Name() == apimeta.RESTScopeNameNamespace).
+			Resource(mapping.Resource).
+			Name(ref.Name).Do()
+
+		result, err := req.Get()
+		if err != nil {
+			return nil, err
+		}
+		return result, nil
+	}
+	if ref.Kind == DepKind || ref.Kind == RSKind {
+		extkc := extkclientv1beta1.NewForConfigOrDie(&newConfig)
+		extkcclient := extkc.RESTClient()
+		req := extkcclient.Get().
 			NamespaceIfScoped(ref.Namespace, mapping.Scope.Name() == apimeta.RESTScopeNameNamespace).
 			Resource(mapping.Resource).
 			Name(ref.Name).Do()
@@ -287,14 +296,6 @@ func getProjectResource(obj interface{}) ([]string, error) {
 	return []string{}, nil
 }
 
-func getRCByDC(obj interface{}) ([]string, error) {
-	object := obj.(*ResourceObject)
-	if object.Kind == RCKind {
-		return []string{object.DeploymentConfig}, nil
-	}
-	return []string{}, nil
-}
-
 func getAllResourcesOfKind(obj interface{}) ([]string, error) {
 	object := obj.(*ResourceObject)
 	return []string{object.Kind}, nil
@@ -328,6 +329,17 @@ func (c *Cache) SetUpIndexer() {
 	}
 	rcr := kcache.NewReflector(rcLW, &corev1.ReplicationController{}, c.Indexer, 0)
 	go rcr.Run(c.stopChan)
+
+	rsLW := &kcache.ListWatch{
+		ListFunc: func(options metav1.ListOptions) (runtime.Object, error) {
+			return c.KubeClient.ExtensionsV1beta1().ReplicaSets(metav1.NamespaceAll).List(options)
+		},
+		WatchFunc: func(options metav1.ListOptions) (watch.Interface, error) {
+			return c.KubeClient.ExtensionsV1beta1().ReplicaSets(metav1.NamespaceAll).Watch(options)
+		},
+	}
+	rsr := kcache.NewReflector(rsLW, &v1beta1.ReplicaSet{}, c.Indexer, 0)
+	go rsr.Run(c.stopChan)
 
 	svcLW := &kcache.ListWatch{
 		ListFunc: func(options metav1.ListOptions) (runtime.Object, error) {

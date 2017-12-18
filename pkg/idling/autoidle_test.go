@@ -435,13 +435,12 @@ func podResource(uid, name, namespace, resourceVersion string, request resource.
 
 func rcResource(uid, name, namespace, resourceVersion, dc string, rt []*cache.RunningTime) *cache.ResourceObject {
 	return &cache.ResourceObject{
-		UID:              types.UID(uid),
-		Name:             name,
-		Namespace:        namespace,
-		Kind:             cache.RCKind,
-		ResourceVersion:  resourceVersion,
-		DeploymentConfig: dc,
-		RunningTimes:     rt,
+		UID:             types.UID(uid),
+		Name:            name,
+		Namespace:       namespace,
+		Kind:            cache.RCKind,
+		ResourceVersion: resourceVersion,
+		RunningTimes:    rt,
 	}
 }
 

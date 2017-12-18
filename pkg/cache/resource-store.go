@@ -10,6 +10,7 @@ import (
 	osclient "github.com/openshift/client-go/apps/clientset/versioned"
 
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/api/extensions/v1beta1"
 	kerrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/api/resource"
@@ -32,7 +33,6 @@ type ResourceObject struct {
 	ResourceVersion   string
 	RunningTimes      []*RunningTime
 	MemoryRequested   resource.Quantity
-	DeploymentConfig  string
 	LastSleepTime     time.Time
 	ProjectSortIndex  float64
 	DeletionTimestamp time.Time
@@ -60,6 +60,12 @@ func (s *resourceStore) NewResourceFromInterface(resource interface{}) (*Resourc
 		return s.NewResourceFromService(r), nil
 	case *corev1.Namespace:
 		return s.NewResourceFromProject(r), nil
+	case *v1beta1.ReplicaSet:
+		newResource, err := s.NewResourceFromRS(r)
+		if err != nil {
+			return nil, err
+		}
+		return newResource, nil
 	}
 	return nil, fmt.Errorf("unknown resource of type %T", resource)
 }
@@ -87,6 +93,18 @@ func (s *resourceStore) AddOrModify(obj interface{}) error {
 		}
 		glog.V(3).Infof("Received ADD/MODIFY for RC: %s\n", resObj.Name)
 		// If RC has more than 0 active replicas, make sure it's started in cache
+		if r.Status.Replicas > 0 {
+			s.startResource(resObj)
+		} else { // replicas == 0
+			s.stopResource(resObj)
+		}
+	case *v1beta1.ReplicaSet:
+		resObj, err := s.NewResourceFromInterface(obj.(*v1beta1.ReplicaSet))
+		if err != nil {
+			return err
+		}
+		glog.V(3).Infof("Received ADD/MODIFY for RS: %s\n", resObj.Name)
+		// If RS has more than 0 active replicas, make sure it's started in cache
 		if r.Status.Replicas > 0 {
 			s.startResource(resObj)
 		} else { // replicas == 0
@@ -159,7 +177,7 @@ func (s *resourceStore) AddOrModify(obj interface{}) error {
 func (s *resourceStore) DeleteKapiResource(obj interface{}) error {
 	glog.V(3).Infof("Received DELETE event\n")
 	switch r := obj.(type) {
-	case *corev1.Pod, *corev1.ReplicationController:
+	case *corev1.Pod, *corev1.ReplicationController, *v1beta1.ReplicaSet:
 		resObj, err := s.NewResourceFromInterface(r)
 		if err != nil {
 			return err
@@ -203,7 +221,7 @@ func (s *resourceStore) Add(obj interface{}) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	switch r := obj.(type) {
-	case *corev1.Namespace, *corev1.Service, *corev1.Pod, *corev1.ReplicationController:
+	case *corev1.Namespace, *corev1.Service, *corev1.Pod, *corev1.ReplicationController, *v1beta1.ReplicaSet:
 		if err := s.AddOrModify(r); err != nil {
 			return fmt.Errorf("Error: %s", err)
 		}
@@ -217,7 +235,7 @@ func (s *resourceStore) Delete(obj interface{}) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	switch obj.(type) {
-	case *corev1.Namespace, *corev1.Service, *corev1.Pod, *corev1.ReplicationController:
+	case *corev1.Namespace, *corev1.Service, *corev1.Pod, *corev1.ReplicationController, *v1beta1.ReplicaSet:
 		if err := s.DeleteKapiResource(obj); err != nil {
 			return fmt.Errorf("Error: %s", err)
 		}
@@ -231,7 +249,7 @@ func (s *resourceStore) Update(obj interface{}) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	switch r := obj.(type) {
-	case *corev1.Namespace, *corev1.Service, *corev1.Pod, *corev1.ReplicationController:
+	case *corev1.Namespace, *corev1.Service, *corev1.Pod, *corev1.ReplicationController, *v1beta1.ReplicaSet:
 		if err := s.AddOrModify(r); err != nil {
 			return fmt.Errorf("Error: %s", err)
 		}
@@ -257,7 +275,7 @@ func (s *resourceStore) DeleteResourceObject(obj *ResourceObject) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	switch obj.Kind {
-	case PodKind, RCKind, ServiceKind:
+	case PodKind, RCKind, ServiceKind, RSKind:
 		UID := string(obj.UID)
 		if s.ResourceInCache(UID) {
 			// Should this be stopResource?
@@ -339,7 +357,7 @@ func (s *resourceStore) Replace(objs []interface{}, resVer string) error {
 	s.Indexer.Replace(objsToSave, resVer)
 	for _, obj := range objs {
 		switch r := obj.(type) {
-		case *corev1.Namespace, *corev1.Service, *corev1.Pod, *corev1.ReplicationController:
+		case *corev1.Namespace, *corev1.Service, *corev1.Pod, *corev1.ReplicationController, *v1beta1.ReplicaSet:
 			if err := s.AddOrModify(r); err != nil {
 				return err
 			}
@@ -420,7 +438,6 @@ func NewResourceStore(exclude map[string]bool, osClient osclient.Interface, kube
 			"byNamespaceAndKind": indexResourceByNamespaceAndKind,
 			"getProject":         getProjectResource,
 			"ofKind":             getAllResourcesOfKind,
-			"rcByDC":             getRCByDC,
 		}),
 		Exclude:    exclude,
 		OsClient:   osClient,
@@ -597,50 +614,36 @@ func (s *resourceStore) NewResourceFromPod(pod *corev1.Pod) *ResourceObject {
 	if (pod.Spec.RestartPolicy != corev1.RestartPolicyAlways) && (pod.Spec.ActiveDeadlineSeconds != nil) {
 		terminating = true
 	}
-
 	resource := &ResourceObject{
-		UID:             pod.ObjectMeta.UID,
-		Name:            pod.ObjectMeta.Name,
-		Namespace:       pod.ObjectMeta.Namespace,
+		UID:             pod.GetUID(),
+		Name:            pod.GetName(),
+		Namespace:       pod.GetNamespace(),
 		Kind:            PodKind,
 		Terminating:     terminating,
 		MemoryRequested: pod.Spec.Containers[0].Resources.Limits["memory"],
 		RunningTimes:    make([]*RunningTime, 0),
-		Labels:          make(map[string]string),
-		Annotations:     make(map[string]string),
+		Labels:          pod.GetLabels(),
+		Annotations:     pod.GetAnnotations(),
 	}
-
-	for k, v := range pod.ObjectMeta.Labels {
-		resource.Labels[k] = v
-	}
-
-	for k, v := range pod.ObjectMeta.Annotations {
-		resource.Annotations[k] = v
-	}
-
 	if pod.ObjectMeta.DeletionTimestamp.IsZero() {
 		resource.DeletionTimestamp = time.Time{}
 	} else {
 		resource.DeletionTimestamp = pod.ObjectMeta.DeletionTimestamp.Time
 	}
+
 	return resource
 }
 
 func (s *resourceStore) NewResourceFromRC(rc *corev1.ReplicationController) *ResourceObject {
 	resource := &ResourceObject{
-		UID:              rc.ObjectMeta.UID,
-		Name:             rc.ObjectMeta.Name,
-		Namespace:        rc.ObjectMeta.Namespace,
-		Kind:             RCKind,
-		ResourceVersion:  rc.ObjectMeta.ResourceVersion,
-		DeploymentConfig: rc.ObjectMeta.Annotations[OpenShiftDCName],
-		RunningTimes:     make([]*RunningTime, 0),
-		Selectors:        labels.SelectorFromSet(rc.Spec.Selector),
-		Labels:           make(map[string]string),
-	}
-
-	for k, v := range rc.ObjectMeta.Labels {
-		resource.Labels[k] = v
+		UID:             rc.GetUID(),
+		Name:            rc.GetName(),
+		Namespace:       rc.GetNamespace(),
+		Kind:            RCKind,
+		ResourceVersion: rc.GetResourceVersion(),
+		RunningTimes:    make([]*RunningTime, 0),
+		Selectors:       labels.SelectorFromSet(rc.Spec.Selector),
+		Labels:          rc.GetLabels(),
 	}
 
 	if rc.ObjectMeta.DeletionTimestamp.IsZero() {
@@ -651,13 +654,37 @@ func (s *resourceStore) NewResourceFromRC(rc *corev1.ReplicationController) *Res
 	return resource
 }
 
+func (s *resourceStore) NewResourceFromRS(rs *v1beta1.ReplicaSet) (*ResourceObject, error) {
+	selector, err := metav1.LabelSelectorAsSelector(rs.Spec.Selector)
+	if err != nil {
+		return nil, err
+	}
+	resource := &ResourceObject{
+		UID:             rs.GetUID(),
+		Name:            rs.GetName(),
+		Namespace:       rs.GetNamespace(),
+		Kind:            RSKind,
+		ResourceVersion: rs.GetResourceVersion(),
+		RunningTimes:    make([]*RunningTime, 0),
+		Selectors:       selector,
+		Labels:          rs.GetLabels(),
+	}
+
+	if rs.ObjectMeta.DeletionTimestamp.IsZero() {
+		resource.DeletionTimestamp = time.Time{}
+	} else {
+		resource.DeletionTimestamp = rs.ObjectMeta.DeletionTimestamp.Time
+	}
+	return resource, nil
+}
+
 func (s *resourceStore) NewResourceFromService(svc *corev1.Service) *ResourceObject {
 	resource := &ResourceObject{
-		UID:             svc.ObjectMeta.UID,
-		Name:            svc.ObjectMeta.Name,
-		Namespace:       svc.ObjectMeta.Namespace,
+		UID:             svc.GetUID(),
+		Name:            svc.GetName(),
+		Namespace:       svc.GetNamespace(),
 		Kind:            ServiceKind,
-		ResourceVersion: svc.ObjectMeta.ResourceVersion,
+		ResourceVersion: svc.GetResourceVersion(),
 		Selectors:       labels.SelectorFromSet(svc.Spec.Selector),
 	}
 
