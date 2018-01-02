@@ -604,7 +604,7 @@ func (s *resourceStore) NewResourceFromPod(pod *corev1.Pod) *ResourceObject {
 		Namespace:       pod.ObjectMeta.Namespace,
 		Kind:            PodKind,
 		Terminating:     terminating,
-		MemoryRequested: pod.Spec.Containers[0].Resources.Requests["memory"],
+		MemoryRequested: pod.Spec.Containers[0].Resources.Limits["memory"],
 		RunningTimes:    make([]*RunningTime, 0),
 		Labels:          make(map[string]string),
 		Annotations:     make(map[string]string),
