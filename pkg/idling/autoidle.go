@@ -108,7 +108,7 @@ func (idler *Idler) sync(netmap map[string]float64) {
 		}
 		if !scalable {
 			glog.V(2).Infof("Auto-idler: Project( %s )sync complete", ns)
-			return
+			continue
 		}
 		if !idler.config.Exclude[ns] {
 			nsInMap := false
@@ -216,6 +216,11 @@ func (idler *Idler) checkForScalables(namespace string) (bool, error) {
 		return scalable, err
 	}
 
+	if len(projectPods) == 0 {
+		glog.V(2).Infof("Auto-idler: No pods found in project( %s )", namespace)
+		return scalable, nil
+	}
+
 	for _, podObj := range projectPods {
 		pod := podObj.(*cache.ResourceObject)
 		if _, ok := pod.Labels[cache.BuildAnnotation]; ok {
@@ -237,7 +242,7 @@ func (idler *Idler) checkForScalables(namespace string) (bool, error) {
 			scalablePods = append(scalablePods, pod)
 		}
 	}
-	// if there are no running pods, project can't be idled
+	// if there are no running pods, project can't be idled, or might already be idled
 	if len(scalablePods) == 0 {
 		glog.V(2).Infof("Auto-idler: No pods associated with services in project( %s )", namespace)
 		return scalable, nil
@@ -267,11 +272,13 @@ func (idler *Idler) autoIdleProjectServices(namespace string) error {
 		glog.V(2).Infof("Auto-idler: Project( %s )currently in force-sleep, exiting...", namespace)
 		return nil
 	}
+
 	glog.V(0).Infof("Auto-idler: Adding previous scale annotation in project( %s )", namespace)
 	err = AddProjectPreviousScaleAnnotation(idler.resources, namespace)
 	if err != nil {
 		return fmt.Errorf("Error adding project( %s )previous scale annotation: %s", namespace, err)
 	}
+
 	glog.V(2).Infof("Auto-idler: Scaling DCs in project %s", namespace)
 	err = ScaleProjectDCs(idler.resources, namespace)
 	if err != nil {
@@ -283,16 +290,31 @@ func (idler *Idler) autoIdleProjectServices(namespace string) error {
 	if err != nil {
 		return fmt.Errorf("Error scaling RCs in project %s: %s", namespace, err)
 	}
+
+	glog.V(2).Infof("Auto-idler: Scaling Deployments in project %s", namespace)
+	err = ScaleProjectDeployments(idler.resources, namespace)
+	if err != nil {
+		return fmt.Errorf("Error scaling Deployments in project %s: %s", namespace, err)
+	}
+
+	glog.V(2).Infof("Auto-idler: Scaling ReplicaSets in project %s", namespace)
+	err = ScaleProjectRSs(idler.resources, namespace)
+	if err != nil {
+		return fmt.Errorf("Error scaling ReplicaSets in project %s: %s", namespace, err)
+	}
+
 	glog.V(2).Infof("Auto-idler: Deleting pods in project %s", namespace)
 	err = DeleteProjectPods(idler.resources, namespace)
 	if err != nil {
 		return fmt.Errorf("Error deleting pods in project %s: %s", namespace, err)
 	}
+
 	glog.V(0).Infof("Auto-idler: Adding idled-at annotation in project( %s )", namespace)
 	err = AddProjectIdledAtAnnotation(idler.resources, namespace, nowTime, idler.config.ProjectSleepPeriod)
 	if err != nil {
 		return fmt.Errorf("Error adding idled-at annotation in project( %s ): %v", namespace, err)
 	}
+
 	glog.V(2).Infof("Auto-idler: Project( %s )endpoints are now idled", namespace)
 	return nil
 }

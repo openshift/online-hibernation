@@ -8,6 +8,7 @@ import (
 	"github.com/openshift/online-hibernation/pkg/cache"
 
 	appsv1 "github.com/openshift/api/apps/v1"
+	"k8s.io/api/extensions/v1beta1"
 
 	"github.com/golang/glog"
 	corev1 "k8s.io/api/core/v1"
@@ -68,6 +69,36 @@ func ScaleProjectDCs(c *cache.Cache, namespace string) error {
 	return nil
 }
 
+func ScaleProjectDeployments(c *cache.Cache, namespace string) error {
+	depInterface := c.KubeClient.ExtensionsV1beta1().Deployments(namespace)
+	depList, err := depInterface.List(metav1.ListOptions{})
+	if err != nil {
+		return err
+	}
+
+	failed := false
+	for _, dep := range depList.Items {
+		// Scale down deployment
+		copy, err := cache.Scheme.DeepCopy(dep)
+		if err != nil {
+			return err
+		}
+		newDep := copy.(v1beta1.Deployment)
+		newDep.Spec.Replicas = int32Ptr(0)
+		_, err = depInterface.Update(&newDep)
+		if err != nil {
+			if !kerrors.IsNotFound(err) {
+				glog.Errorf("Project( %s) Deployment( %s ): %s", namespace, dep.Name, err)
+				failed = true
+			}
+		}
+	}
+	if failed {
+		return fmt.Errorf("Failed to scale all project( %s)Deployments", namespace)
+	}
+	return nil
+}
+
 func ScaleProjectRCs(c *cache.Cache, namespace string) error {
 	// Scale RCs to 0
 	rcInterface := c.KubeClient.CoreV1().ReplicationControllers(namespace)
@@ -78,17 +109,22 @@ func ScaleProjectRCs(c *cache.Cache, namespace string) error {
 
 	failed := false
 	for _, thisRC := range rcList.Items {
-		// TODO: Use indexer function 'rcByDC' here for efficiency?
 		// Given thisRC name, check to see if thisRC has a DC
 		// If thisRC does not have an associated DC, then scale the RC,
-		if _, exists := thisRC.Spec.Selector["deploymentconfig"]; !exists {
+		objref := thisRC.ObjectMeta.GetOwnerReferences()
+		var ref metav1.OwnerReference
+		if len(objref) != 0 {
+			ref = objref[0]
+		} else {
+			ref = metav1.OwnerReference{}
+		}
+		if ref.Kind != "DeploymentConfig" {
 			copy, err := cache.Scheme.DeepCopy(thisRC)
 			if err != nil {
 				return err
 			}
 			newRC := copy.(corev1.ReplicationController)
-			newRC.Spec.Replicas = new(int32)
-			*newRC.Spec.Replicas = 0
+			newRC.Spec.Replicas = int32Ptr(0)
 			_, err = rcInterface.Update(&newRC)
 			if err != nil {
 				if !kerrors.IsNotFound(err) {
@@ -97,12 +133,56 @@ func ScaleProjectRCs(c *cache.Cache, namespace string) error {
 				}
 			}
 		} else {
-			dc := thisRC.Spec.Selector["deploymentconfig"]
+			dc := ref.Name
 			glog.V(3).Infof("Skipping RC( %s ), already scaled associated DC( %s )", thisRC.Name, dc)
 		}
 	}
 	if failed {
 		return fmt.Errorf("Failed to scale all project( %s )RCs", namespace)
+	}
+	return nil
+}
+
+func ScaleProjectRSs(c *cache.Cache, namespace string) error {
+	rsInterface := c.KubeClient.ExtensionsV1beta1().ReplicaSets(namespace)
+	rsList, err := rsInterface.List(metav1.ListOptions{})
+	if err != nil {
+		return err
+	}
+
+	failed := false
+	for _, thisRS := range rsList.Items {
+		// Given thisRS name, check to see if thisRS has a Deployment
+		// If thisRS does not have an associated Deployment, then scale the RS,
+		objref := thisRS.ObjectMeta.GetOwnerReferences()
+		var ref metav1.OwnerReference
+		if len(objref) != 0 {
+			ref = objref[0]
+		} else {
+			ref = metav1.OwnerReference{}
+		}
+		if ref.Kind != "Deployment" {
+			glog.V(2).Infof("GOT HERE!!! %v", ref.Kind)
+			copy, err := cache.Scheme.DeepCopy(thisRS)
+			if err != nil {
+				return err
+			}
+			newRS := copy.(v1beta1.ReplicaSet)
+			newRS.Spec.Replicas = int32Ptr(0)
+			_, err = rsInterface.Update(&newRS)
+			if err != nil {
+				if !kerrors.IsNotFound(err) {
+					glog.Errorf("Project( %s) RS( %s ): %s", namespace, thisRS.Name, err)
+					failed = true
+				}
+			}
+		} else {
+			deployment := ref.Name
+			glog.V(2).Infof("Skipping RS( %s ), already scaled associated Deployment( %s )", thisRS.Name, deployment)
+		}
+	}
+	if failed {
+		return fmt.Errorf("Failed to scale all project( %s )RSs", namespace)
 	}
 	return nil
 }
@@ -334,7 +414,7 @@ func AnnotateController(c *cache.Cache, ref corev1.ObjectReference, nowTime time
 				}
 				delete(newDC.Annotations, IdledAtAnnotation)
 			}
-			newDC.Annotations[PreviousScaleAnnotation] = fmt.Sprintf("%v", controller.Spec.Replicas)
+			newDC.Annotations[PreviousScaleAnnotation] = fmt.Sprintf("%d", replicas)
 		}
 		_, err = dcInterface.Update(newDC)
 		if err != nil {
@@ -368,7 +448,7 @@ func AnnotateController(c *cache.Cache, ref corev1.ObjectReference, nowTime time
 				}
 				delete(newRC.Annotations, IdledAtAnnotation)
 			}
-			newRC.Annotations[PreviousScaleAnnotation] = fmt.Sprintf("%v", controller.Spec.Replicas)
+			newRC.Annotations[PreviousScaleAnnotation] = fmt.Sprintf("%d", replicas)
 		}
 
 		_, err = rcInterface.Update(newRC)
@@ -380,9 +460,83 @@ func AnnotateController(c *cache.Cache, ref corev1.ObjectReference, nowTime time
 			}
 		}
 
+	case *v1beta1.ReplicaSet:
+		rsInterface := c.KubeClient.ExtensionsV1beta1().ReplicaSets(controller.Namespace)
+		copy, err := cache.Scheme.DeepCopy(controller)
+		if err != nil {
+			return nil, err
+		}
+		newRS := copy.(*v1beta1.ReplicaSet)
+		replicas = *controller.Spec.Replicas
+		if newRS.Annotations == nil {
+			newRS.Annotations = make(map[string]string)
+		}
+		switch annotation {
+		case IdledAtAnnotation:
+			newRS.Annotations[IdledAtAnnotation] = nowTime.Format(time.RFC3339)
+		case PreviousScaleAnnotation:
+			if newRS.Annotations[IdledAtAnnotation] != "" {
+				if isAsleep {
+					glog.V(2).Infof("Force-sleeper: Removing stale idled-at annotation in RS( %s ) project( %s )", newRS.Name, controller.Namespace)
+				} else {
+					glog.V(2).Infof("Auto-idler: Removing stale idled-at annotation in RS( %s ) project( %s )", newRS.Name, controller.Namespace)
+				}
+				delete(newRS.Annotations, IdledAtAnnotation)
+			}
+			newRS.Annotations[PreviousScaleAnnotation] = fmt.Sprintf("%d", replicas)
+		}
+
+		_, err = rsInterface.Update(newRS)
+		if err != nil {
+			if kerrors.IsNotFound(err) {
+				return nil, nil
+			} else {
+				return nil, err
+			}
+		}
+
+	case *v1beta1.Deployment:
+		depInterface := c.KubeClient.ExtensionsV1beta1().Deployments(controller.Namespace)
+		copy, err := cache.Scheme.DeepCopy(controller)
+		if err != nil {
+			return nil, err
+		}
+		newDep := copy.(*v1beta1.Deployment)
+		replicas = *controller.Spec.Replicas
+		if newDep.Annotations == nil {
+			newDep.Annotations = make(map[string]string)
+		}
+		switch annotation {
+		case IdledAtAnnotation:
+			newDep.Annotations[IdledAtAnnotation] = nowTime.Format(time.RFC3339)
+		case PreviousScaleAnnotation:
+			if newDep.Annotations[IdledAtAnnotation] != "" {
+				if isAsleep {
+					glog.V(2).Infof("Force-sleeper: Removing stale idled-at annotation in Deployment( %s ) project( %s )", newDep.Name, controller.Namespace)
+				} else {
+					glog.V(2).Infof("Auto-idler: Removing stale idled-at annotation in RS( %s ) project( %s )", newDep.Name, controller.Namespace)
+				}
+				delete(newDep.Annotations, IdledAtAnnotation)
+			}
+			newDep.Annotations[PreviousScaleAnnotation] = fmt.Sprintf("%d", replicas)
+		}
+
+		_, err = depInterface.Update(newDep)
+		if err != nil {
+			if kerrors.IsNotFound(err) {
+				return nil, nil
+			} else {
+				return nil, err
+			}
+		}
+
 	}
+
 	return &ControllerScaleReference{
 		Name:     ref.Name,
 		Kind:     ref.Kind,
 		Replicas: replicas}, nil
 }
+
+// borrowed this convenience function from k8s.io/client-go/examples/create-update-delete-deployment
+func int32Ptr(i int32) *int32 { return &i }
