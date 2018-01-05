@@ -34,7 +34,7 @@ parameters:
   value: "8h"
 - name: EXCLUDE_NAMESPACES
   description: Comma-separated list of namespace to exclude in quota enforcement
-  value: "openshift,openshift-devops-monitor,openshift-infra,openshift-node,default,logging,kube-service-catalog,kube-system,kube-public,management-infra,ops-health-monitoring,prometheus"
+  value: "openshift,openshift-devops-monitor,openshift-infra,openshift-metrics,openshift-node,prometheus,default,logging,kube-system,kube-public,kube-service-catalog,management-infra,ops-health-monitoring"
 - name: IDLE_SYNC_PERIOD
   description: Interval to sync project status for idler
   value: "30m"
@@ -96,6 +96,7 @@ objects:
     - namespaces
     - pods
     - replicationcontrollers
+    - deploymentconfigs
     - resourcequotas
     - services
     - endpoints
@@ -116,7 +117,32 @@ objects:
     - list
     - watch
     - update
-
+  - apiGroups:
+    - ""
+    - apps
+    resources:
+    - deployments
+    - daemonsets
+    - statefulsets
+    - replicasets
+    verbs:
+    - get
+    - list
+    - watch
+    - update
+  - apiGroups:
+    - ""
+    - extensions
+    resources:
+    - deployments
+    - daemonsets
+    - statefulsets
+    - replicasets
+    verbs:
+    - get
+    - list
+    - watch
+    - update
 
 # A service account for use by hibernation
 - apiVersion: v1
@@ -239,3 +265,4 @@ objects:
           - -logtostderr
           - -collectRuntime=${METRICS_COLLECT_RUNTIME}
           - -collectCache=${METRICS_COLLECT_CACHE}
+
