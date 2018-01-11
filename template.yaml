@@ -34,7 +34,7 @@ parameters:
   value: "8h"
 - name: EXCLUDE_NAMESPACES
   description: Comma-separated list of namespace to exclude in quota enforcement
-  value: "openshift,openshift-devops-monitor,openshift-infra,openshift-metrics,openshift-node,prometheus,default,logging,kube-system,kube-public,kube-service-catalog,management-infra,ops-health-monitoring"
+  value: "openshift,openshift-devops-monitor,openshift-infra,openshift-image-inspector,openshift-metrics,openshift-node,openshift-web-console,prometheus,default,logging,kube-system,kube-public,kube-service-catalog,management-infra,ops-health-monitoring"
 - name: IDLE_SYNC_PERIOD
   description: Interval to sync project status for idler
   value: "30m"
