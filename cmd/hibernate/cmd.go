@@ -4,6 +4,7 @@ import (
 	"flag"
 	"log"
 	"net/http"
+	"net/http/pprof"
 	"os"
 	"strings"
 	"time"
@@ -42,12 +43,20 @@ func CreateClientsForConfig() (*restclient.Config, kclient.Interface, error) {
 	return clientConfig, kc, err
 }
 
+func setupPprof(mux *http.ServeMux) {
+	mux.Handle("/debug/pprof/", http.HandlerFunc(pprof.Index))
+	mux.Handle("/debug/pprof/cmdline", http.HandlerFunc(pprof.Cmdline))
+	mux.Handle("/debug/pprof/profile", http.HandlerFunc(pprof.Profile))
+	mux.Handle("/debug/pprof/symbol", http.HandlerFunc(pprof.Symbol))
+	mux.Handle("/debug/pprof/trace", http.HandlerFunc(pprof.Trace))
+}
+
 func main() {
 	log.SetOutput(os.Stdout)
 	var quota, period, sleepSyncPeriod, idleSyncPeriod, idleQueryPeriod, projectSleepPeriod time.Duration
 	var workers, threshold int
 	var cfgFile, excludeNamespaces, termQuota, nontermQuota, prometheusURL, metricsBindAddr string
-	var idleDryRun, sleepDryRun, collectRuntime, collectCache bool
+	var idleDryRun, sleepDryRun, collectRuntime, collectCache, enableProfiling bool
 
 	flag.DurationVar(&quota, "quota", 16*time.Hour, "Maximum quota-hours allowed in period before force sleep")
 	flag.DurationVar(&period, "period", 24*time.Hour, "Length of period in hours for quota consumption")
@@ -63,6 +72,8 @@ func main() {
 	flag.StringVar(&nontermQuota, "nonterminating", "", "Memory quota for non-terminating pods")
 
 	flag.StringVar(&metricsBindAddr, "metricsBindAddr", ":8080", "The address on localhost serving metrics - http://localhost:port/metrics")
+	flag.BoolVar(&enableProfiling, "enable-profiling", false, "Whether or not to enable pprof debug endpoints on the same address as the metrics endpoint")
+
 	flag.BoolVar(&collectRuntime, "collectRuntime", true, "Enable runtime metrics")
 	flag.BoolVar(&collectCache, "collectCache", true, "Enable cache metrics")
 	flag.StringVar(&prometheusURL, "prometheus-url", "https://prometheus.openshift-devops-monitor.svc.cluster.local", "Prometheus url")
@@ -142,7 +153,7 @@ func main() {
 
 	sleeper := forcesleep.NewSleeper(sleeperConfig, cache)
 
-	// Spawn metrics server
+	// Spawn metrics server and pprof endpoints
 	go func() {
 		metricsConfig := forcesleep.MetricsConfig{
 			CollectRuntime: collectRuntime,
@@ -159,6 +170,10 @@ func main() {
 
 		mux := http.NewServeMux()
 		mux.Handle("/metrics", metricsHandler)
+		if enableProfiling {
+			setupPprof(mux)
+		}
+
 		httpServer := &http.Server{
 			Addr:    metricsBindAddr,
 			Handler: mux,
