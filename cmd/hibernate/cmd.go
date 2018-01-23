@@ -3,6 +3,7 @@ package main
 import (
 	"flag"
 	"log"
+	"net/http"
 	"os"
 	"strings"
 	"time"
@@ -144,19 +145,26 @@ func main() {
 	// Spawn metrics server
 	go func() {
 		metricsConfig := forcesleep.MetricsConfig{
-			BindAddr:       metricsBindAddr,
 			CollectRuntime: collectRuntime,
 			CollectCache:   collectCache,
 		}
-
-		server := forcesleep.MetricsServer{
+		metricsHandlerBuilder := forcesleep.MetricsServer{
 			Config:     metricsConfig,
 			Controller: sleeper,
 		}
-		err := server.Serve()
+		metricsHandler, err := metricsHandlerBuilder.Handler()
 		if err != nil {
-			glog.Errorf("error running metrics server: %s", err)
+			glog.Fatalf("error setting up Prometheus metrics: %s", err)
 		}
+
+		mux := http.NewServeMux()
+		mux.Handle("/metrics", metricsHandler)
+		httpServer := &http.Server{
+			Addr:    metricsBindAddr,
+			Handler: mux,
+		}
+
+		glog.Fatal(httpServer.ListenAndServe())
 	}()
 
 	sleeper.Run(c)
