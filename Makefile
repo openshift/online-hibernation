@@ -20,19 +20,22 @@ build: check-gopath
 		-o $(OUT_DIR)/$(ARCH)/hibernate github.com/openshift/online-hibernation/cmd/hibernate
 .PHONY: build
 
-.PHONY: test
 # Runs the unit tests.
 #
 # Args:
 #   TESTFLAGS: Flags to pass to `go test`. The `-v` argument is always passed.
 #
 # Examples:
-#   make test TESTFLAGS="-run TestSomething"
-test: build
+#   make test-unit TESTFLAGS="-run TestSomething"
+test-unit:
 	go test -v $(TESTFLAGS) \
 		github.com/openshift/online-hibernation/pkg/cache/... github.com/openshift/online-hibernation/pkg/forcesleep/... github.com/openshift/online-hibernation/pkg/idling/...
-.PHONY: test
+.PHONY: test-unit
 
+
+# Runs build, verify, and test-unit conviniently as one command (for CI testing)
+test: verify build test-unit
+.PHONY: test
 
 # Build a release image. The resulting image can be used with test-release.
 #
@@ -80,7 +83,7 @@ help:
 	@echo "OpenShift Online Hibernation Controller"
 	@echo ""
 	@echo "make build                compile binaries"
-	@echo "make test-integration     run integration tests"
+	@echo "make test-unit            run the unit tests"
 	@echo "make release              build release image using Dockerfile"
 	@echo "make test-release         run unit and integration tests in Docker container"
 	@echo "make verify               lint source code"
