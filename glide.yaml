@@ -2,10 +2,10 @@ package: github.com/openshift/online-hibernation
 
 import:
 - package: github.com/openshift/api
-  version: master
+  version: release-3.8
 
 - package: github.com/openshift/client-go
-  version: master
+  version: release-3.8
 
 - package: k8s.io/api
   version: release-1.8
