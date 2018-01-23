@@ -67,7 +67,7 @@ test-release:
 
 # Verifies that source passes standard checks.
 verify:
-	$(GOPATH)/src/github.com/openshift/online/hack/verify-source.sh
+	hack/verify-source.sh
 	go vet \
 		github.com/openshift/online-hibernation/cmd/... \
 		github.com/openshift/online-hibernation/pkg/...
