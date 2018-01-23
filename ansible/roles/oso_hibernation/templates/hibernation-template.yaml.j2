@@ -247,21 +247,22 @@ objects:
               cpu: ${CPU_LIMIT}
           command:
           - /go/bin/hibernate
-          - -quota=${QUOTA_HOURS}
-          - -period=${PERIOD}
-          - -sleep-sync-period=${SLEEP_SYNC_PERIOD}
-          - -z=${PROJECT_SLEEP_LENGTH}
-          - -w=10
-          - -exclude-namespace=${EXCLUDE_NAMESPACES}
-          - -terminating=${TERMINATING_QUOTA}
-          - -nonterminating=${NONTERMINATING_QUOTA}
-          - -idle-sync-period=${IDLE_SYNC_PERIOD}
-          - -idle-query-period=${IDLE_QUERY_PERIOD}
-          - -idle-dry-run=${IDLE_DRYRUN}
-          - -sleep-dry-run=${SLEEP_DRYRUN}
-          - -idle-threshold=${IDLE_THRESHOLD}
-          - -prometheus-url=${PROMETHEUS_URL}
-          - -v=${LOG_LEVEL}
-          - -logtostderr
-          - -collectRuntime=${METRICS_COLLECT_RUNTIME}
-          - -collectCache=${METRICS_COLLECT_CACHE}
+          - --quota=${QUOTA_HOURS}
+          - --period=${PERIOD}
+          - --sleep-sync-period=${SLEEP_SYNC_PERIOD}
+          - --sleep-duration=${PROJECT_SLEEP_LENGTH}
+          - --workers=10
+          - --exclude-namespace=${EXCLUDE_NAMESPACES}
+          - --terminating=${TERMINATING_QUOTA}
+          - --nonterminating=${NONTERMINATING_QUOTA}
+          - --idle-sync-period=${IDLE_SYNC_PERIOD}
+          - --idle-query-period=${IDLE_QUERY_PERIOD}
+          - --idle-dry-run=${IDLE_DRYRUN}
+          - --sleep-dry-run=${SLEEP_DRYRUN}
+          - --idle-threshold=${IDLE_THRESHOLD}
+          - --prometheus-url=${PROMETHEUS_URL}
+          - --v=${LOG_LEVEL}
+          - --logtostderr
+          - --collect-runtime=${METRICS_COLLECT_RUNTIME}
+          - --collect-cache=${METRICS_COLLECT_CACHE}
+

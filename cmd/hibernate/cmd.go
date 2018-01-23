@@ -1,7 +1,7 @@
 package main
 
 import (
-	"flag"
+	goflag "flag"
 	"log"
 	"net/http"
 	"net/http/pprof"
@@ -14,6 +14,7 @@ import (
 	"github.com/openshift/online-hibernation/pkg/forcesleep"
 	"github.com/openshift/online-hibernation/pkg/idling"
 	"github.com/prometheus/client_golang/api/prometheus"
+	flag "github.com/spf13/pflag"
 	"k8s.io/apimachinery/pkg/api/resource"
 	serializer "k8s.io/apimachinery/pkg/runtime/serializer"
 	"k8s.io/client-go/discovery"
@@ -61,21 +62,21 @@ func main() {
 	flag.DurationVar(&quota, "quota", 16*time.Hour, "Maximum quota-hours allowed in period before force sleep")
 	flag.DurationVar(&period, "period", 24*time.Hour, "Length of period in hours for quota consumption")
 	flag.DurationVar(&sleepSyncPeriod, "sleep-sync-period", 60*time.Minute, "Interval to sync project status")
-	flag.DurationVar(&projectSleepPeriod, "z", 8*time.Hour, "Length of time to apply force-sleep to projects over quota.")
+	flag.DurationVarP(&projectSleepPeriod, "sleep-duration", "z", 8*time.Hour, "Length of time to apply force-sleep to projects over quota.")
 	flag.BoolVar(&sleepDryRun, "sleep-dry-run", true, "Log which projects will be put into force-sleep but do not restrict them.")
 
-	flag.IntVar(&workers, "w", 10, "Number of workers to process project sync")
+	flag.IntVarP(&workers, "workers", "w", 10, "Number of workers to process project sync")
 	flag.StringVar(&cfgFile, "config", "", "load configuration from file")
 	flag.StringVar(&excludeNamespaces, "exclude-namespace", "openshift-infra,default,openshift", "Comma-separated list of namespace to exclude in quota enforcement")
 
 	flag.StringVar(&termQuota, "terminating", "", "Memory quota for terminating pods")
 	flag.StringVar(&nontermQuota, "nonterminating", "", "Memory quota for non-terminating pods")
 
-	flag.StringVar(&metricsBindAddr, "metricsBindAddr", ":8080", "The address on localhost serving metrics - http://localhost:port/metrics")
+	flag.StringVar(&metricsBindAddr, "metrics-bind-addr", ":8080", "The address on localhost serving metrics - http://localhost:port/metrics")
 	flag.BoolVar(&enableProfiling, "enable-profiling", false, "Whether or not to enable pprof debug endpoints on the same address as the metrics endpoint")
 
-	flag.BoolVar(&collectRuntime, "collectRuntime", true, "Enable runtime metrics")
-	flag.BoolVar(&collectCache, "collectCache", true, "Enable cache metrics")
+	flag.BoolVar(&collectRuntime, "collect-runtime", true, "Enable runtime metrics")
+	flag.BoolVar(&collectCache, "collect-cache", true, "Enable cache metrics")
 	flag.StringVar(&prometheusURL, "prometheus-url", "https://prometheus.openshift-devops-monitor.svc.cluster.local", "Prometheus url")
 
 	flag.DurationVar(&idleSyncPeriod, "idle-sync-period", 10*time.Minute, "Interval to sync project idle status")
@@ -83,6 +84,7 @@ func main() {
 	flag.IntVar(&threshold, "idle-threshold", 5000, "Minimun network traffic received (bytes) to avoid auto-idling")
 	flag.BoolVar(&idleDryRun, "idle-dry-run", true, "Log which projects will be auto-idled but do not idle them.")
 
+	flag.CommandLine.AddGoFlagSet(goflag.CommandLine)
 	flag.Parse()
 
 	tQuota, err := resource.ParseQuantity(termQuota)

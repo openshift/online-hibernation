@@ -1,5 +1,5 @@
-hash: cdba1e7ac4bfd8ebcce18c1ff4cb3adca88849b05cb2d62e8bb7115305fb442c
-updated: 2018-01-23T15:59:53.09874806-05:00
+hash: 51aa64d1b03a674ea11415bb4a7ccd71644e16cb50188897b21c12616b65c4c0
+updated: 2018-01-23T16:04:43.867349365-05:00
 imports:
 - name: github.com/beorn7/perks
   version: 3ac7bf7a47d159a033b107610db8a1b6575507a4
@@ -111,7 +111,7 @@ imports:
 - name: github.com/PuerkitoBio/urlesc
   version: 5bd2802263f21d8788851d5305584c82a5c75d7e
 - name: github.com/spf13/pflag
-  version: 9ff6c6923cfffbcd502984b8e0c80539a94968b7
+  version: e57e3eeb33f795204c1ca35f56c44f83227c6e66
 - name: golang.org/x/net
   version: 1c05540f6879653db88113bc4a2b70aec4bd491f
   subpackages:
