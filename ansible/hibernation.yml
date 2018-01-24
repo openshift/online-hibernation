@@ -1,0 +1,37 @@
+---
+- name: Deploy OpenShift Online Hibernation
+  hosts: masters
+  remote_user: root
+  run_once: true
+  tasks:
+  # Check if optional vars and secret vars dirs are specified and exist, and load if so.
+  # This allows for seamless re-use of this playbook between Online devenv and Ops.
+  - set_fact:
+      vars_dir: "./vars/"
+    when: vars_dir is not defined
+  - name: Check if vars/ exists
+    local_action: stat path="{{ vars_dir }}"
+    register: vars_dir_stat
+    become: no
+  - name: Load all variables from vars/
+    include_vars:
+      dir: "{{ vars_dir }}"
+      extensions:
+      - yml
+    when: vars_dir_stat.stat.exists
+
+  - include_role:
+      name: lib_openshift
+
+  - include_role:
+      name: oc_start_build_check
+
+  - include_role:
+      name: oso_hibernation
+    vars:
+      osoh_appname: "{{ online_hibernation_appname }}"
+      osoh_git_repo: "{{ online_hibernation_git_repo }}"
+      osoh_git_ref: "{{ online_hibernation_git_ref }}"
+      osoh_idler_dryrun: "{{ online_hibernation_idler_dryrun }}"
+      osoh_sleeper_dryrun: "{{ online_hibernation_sleeper_dryrun }}"
+      osoh_metrics_namespace: "{{ online_metrics_namespace }}"

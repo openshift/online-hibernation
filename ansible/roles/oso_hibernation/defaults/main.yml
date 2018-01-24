@@ -1,0 +1,24 @@
+# Configure the application name used in the various OpenShift objects created for it.
+# Setting this allows for multiple instances of the archivist to exist in just one
+# namespace. (invoke this role with different osoh_appname setting).
+osoh_appname: "hibernation"
+
+# WARNING: Keep these in sync with the defaults in the templates. We want the
+# template to be independently usable so default must be defined in both.
+osoh_git_repo: "https://github.com/openshift/online-hibernation.git"
+osoh_git_ref: "master"
+
+# Location on master where we store the OpenShift app template:
+osoh_template_path: "/etc/openshift-online/templates/hibernation-template.yaml"
+osoh_namespace: "openshift-infra"
+osoh_metrics_namespace: "openshift-devops-monitor"
+
+# Corresponds to template parameters IDLE_DRYRUN and SLEEP_DRYRUN
+osoh_idler_dryrun: "{{ osoh_idler_dryrun | default('True') }}"
+osoh_sleeper_dryrun: "{{ osoh_sleeper_dryrun | default('True') }}"
+
+# If true, will completely uninstall app before running rest of role:
+osoh_uninstall: False
+
+# Namespaces to exclude from hibernation
+osoh_exclude_namespace: "openshift,openshift-devops-monitor,openshift-infra,openshift-image-inspector,openshift-metrics,openshift-node,openshift-web-console,prometheus,default,logging,kube-system,kube-public,kube-service-catalog,management-infra,ops-health-monitoring"
