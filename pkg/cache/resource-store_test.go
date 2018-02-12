@@ -377,13 +377,13 @@ func TestCacheIsInitiallyPopulated(t *testing.T) {
 
 	svcs, err := store.ByIndex("byNamespaceAndKind", "somens1/"+ServiceKind)
 	if err != nil {
-		t.Fatalf("unexpected error: %v")
+		t.Fatalf("unexpected error: %v", err)
 	}
 
 	if assert.Len(t, svcs, 1, "expected to have one service in namespace somens1") {
 		selector, err := metav1.LabelSelectorAsSelector(&metav1.LabelSelector{MatchLabels: map[string]string{"foo": "bar"}})
 		if err != nil {
-			t.Fatalf("unexpected error: %v")
+			t.Fatalf("unexpected error: %v", err)
 		}
 		resource := &ResourceObject{
 			UID:             "1234",
@@ -458,13 +458,13 @@ func TestReplaceWithMultipleDoesNotConflict(t *testing.T) {
 
 	svcs, err := store.ByIndex("byNamespaceAndKind", "somens1/"+ServiceKind)
 	if err != nil {
-		t.Fatalf("unexpected error: %v")
+		t.Fatalf("unexpected error: %v", err)
 	}
 
 	if assert.Len(t, svcs, 1, "expected to have one service in namespace somens1") {
 		selector, err := metav1.LabelSelectorAsSelector(&metav1.LabelSelector{MatchLabels: map[string]string{"foo": "bar"}})
 		if err != nil {
-			t.Fatalf("unexpected error: %v")
+			t.Fatalf("unexpected error: %v", err)
 		}
 		resource := &ResourceObject{
 			UID:             "1234",
@@ -479,13 +479,13 @@ func TestReplaceWithMultipleDoesNotConflict(t *testing.T) {
 
 	rcs, err := store.ByIndex("byNamespaceAndKind", "somens1/"+RCKind)
 	if err != nil {
-		t.Fatalf("unexpected error: %v")
+		t.Fatalf("unexpected error: %v", err)
 	}
 
 	if assert.Len(t, rcs, 1, "expected to have one rc in namespace somens1") {
 		selector, err := metav1.LabelSelectorAsSelector(&metav1.LabelSelector{MatchLabels: map[string]string{"somercselector": "rcblah"}})
 		if err != nil {
-			t.Fatalf("unexpected error: %v")
+			t.Fatalf("unexpected error: %v", err)
 		}
 		resource := &ResourceObject{
 			UID:               "2345",
@@ -510,13 +510,13 @@ func TestReplaceWithMultipleDoesNotConflict(t *testing.T) {
 
 	rss, err := store.ByIndex("byNamespaceAndKind", "somens3/"+RSKind)
 	if err != nil {
-		t.Fatalf("unexpected error: %v")
+		t.Fatalf("unexpected error: %v", err)
 	}
 
 	if assert.Len(t, rss, 1, "expected to have one rs in namespace somens3") {
 		selector, err := metav1.LabelSelectorAsSelector(&metav1.LabelSelector{MatchLabels: map[string]string{"somersselector": "rsblah"}})
 		if err != nil {
-			t.Fatalf("unexpected error: %v")
+			t.Fatalf("unexpected error: %v", err)
 		}
 		resource := &ResourceObject{
 			UID:               "3345",
@@ -541,7 +541,7 @@ func TestReplaceWithMultipleDoesNotConflict(t *testing.T) {
 
 	pods, err := store.ByIndex("byNamespaceAndKind", "somens1/"+PodKind)
 	if err != nil {
-		t.Fatalf("unexpected error: %v")
+		t.Fatalf("unexpected error: %v", err)
 	}
 
 	if assert.Len(t, pods, 1, "expected to have one pod in namespace somens1") {
@@ -568,7 +568,7 @@ func TestReplaceWithMultipleDoesNotConflict(t *testing.T) {
 
 	rspods, err := store.ByIndex("byNamespaceAndKind", "somens3/"+PodKind)
 	if err != nil {
-		t.Fatalf("unexpected error: %v")
+		t.Fatalf("unexpected error: %v", err)
 	}
 
 	if assert.Len(t, pods, 1, "expected to have one pod in namespace somens3") {
@@ -595,7 +595,7 @@ func TestReplaceWithMultipleDoesNotConflict(t *testing.T) {
 
 	nses, err := store.ByIndex("getProject", "somens1")
 	if err != nil {
-		t.Fatalf("unexpected error: %v")
+		t.Fatalf("unexpected error: %v", err)
 	}
 
 	if assert.Len(t, nses, 1, "expected to have one namespace called somens1") {

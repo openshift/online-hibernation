@@ -15,12 +15,9 @@ type MetricsServer struct {
 }
 
 type MetricsConfig struct {
-	BindAddr       string `json:"bindAddr" yaml:"bindAddr"`
-	CollectRuntime bool   `json:"collectRuntime" yaml:"collectRuntime"`
-	CollectCache   bool   `json:"collectCache" yaml:"collectCache"`
+	CollectRuntime bool `json:"collectRuntime" yaml:"collectRuntime"`
+	CollectCache   bool `json:"collectCache" yaml:"collectCache"`
 }
-
-const MetricsEndpoint = "/metrics"
 
 var CacheSizeMetric = prometheus.NewDesc(
 	"forcesleep_cache_size",
@@ -29,37 +26,28 @@ var CacheSizeMetric = prometheus.NewDesc(
 	prometheus.Labels{},
 )
 
-func (s *MetricsServer) Serve() error {
+func (s *MetricsServer) Handler() (http.Handler, error) {
 	registry := prometheus.NewRegistry()
 
 	if s.Config.CollectRuntime {
 		if err := registry.Register(prometheus.NewGoCollector()); err != nil {
-			return err
+			return nil, err
 		}
 
 		if err := registry.Register(prometheus.NewProcessCollector(os.Getpid(), "")); err != nil {
-			return err
+			return nil, err
 		}
 	}
 
 	if s.Config.CollectCache {
 		if err := registry.Register(NewSizeCollector(s.Controller)); err != nil {
-			return err
+			return nil, err
 		}
 	}
 
-	handler := promhttp.HandlerFor(registry, promhttp.HandlerOpts{
+	return promhttp.HandlerFor(registry, promhttp.HandlerOpts{
 		ErrorLog: &logWrapper{},
-	})
-
-	mux := http.NewServeMux()
-	mux.Handle(MetricsEndpoint, handler)
-	server := &http.Server{
-		Addr:    s.Config.BindAddr,
-		Handler: mux,
-	}
-
-	return server.ListenAndServe()
+	}), nil
 }
 
 type logWrapper struct{}
