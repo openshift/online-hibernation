@@ -1,0 +1,67 @@
+---
+- import_tasks: uninstall.yml
+  when: osoh_uninstall | bool
+
+- debug: msg="Deploying {{ osoh_appname}} from {{ osoh_git_repo }} ref {{ osoh_git_ref }}"
+
+- name: Check that prometheus namespace exists
+  oc_project:
+    state: list
+    name: "{{ osoh_metrics_namespace }}"
+  register: prometheus_namespace_status
+  failed_when: prometheus_namespace_status.results == []
+
+- name: Check for existing metrics pod
+  oc_obj:
+    state: list
+    kind: pod
+    namespace: "{{ osoh_metrics_namespace }}"
+  register: prometheus_pod_list
+  failed_when: prometheus_pod_list.results.results[0]['items'] | count == 0
+
+- name: Copy application template
+  template:
+    src: hibernation-template.yaml.j2
+    dest: "{{ osoh_template_path }}"
+
+- name: Create template
+  oc_obj:
+    state: present
+    namespace: "{{ osoh_namespace }}"
+    name: hibernation
+    kind: template
+    files:
+    - "{{ osoh_template_path }}"
+
+- name: Join project networks for prometheus and hibernation
+  command: oc adm pod-network join-projects --to={{ osoh_metrics_namespace|quote }} {{ osoh_namespace|quote }}
+  changed_when: false
+
+- name: Apply template
+  shell: "oc process -n {{ osoh_namespace }} hibernation -p GIT_REPO='{{ osoh_git_repo }}' -p GIT_REF='{{ osoh_git_ref }}' -p IDLE_DRYRUN='{{ osoh_idler_dryrun }}' -p SLEEP_DRYRUN='{{ osoh_sleeper_dryrun }}' | oc apply -n {{ osoh_namespace }} -f -"
+  # apply does not indicate if something changed today. Assume changed_when
+  # false and rely on the template update as our best indicator if something
+  # changed.
+  changed_when: false
+
+- name: Fetch latest git commit
+  git:
+    repo: "{{ osoh_git_repo }}"
+    version: "{{ osoh_git_ref }}"
+    clone: no
+    accept_hostkey: true
+  register: git_sha1_results
+  # Git may not be installed on remote hosts.
+  delegate_to: localhost
+  changed_when: false
+
+- debug: msg="Checking that latest build matches git ref {{ git_sha1_results.after }}"
+
+- name: Start build if required
+  oc_start_build_check:
+    namespace: "{{ osoh_namespace }}"
+    buildconfig: "hibernation"
+    git_ref: "{{ git_sha1_results.after }}"
+  register: start_build_out
+
+- debug: var=start_build_out

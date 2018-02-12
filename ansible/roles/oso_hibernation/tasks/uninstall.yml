@@ -1,0 +1,18 @@
+---
+- name: "uninstall all {{ osoh_appname }} components"
+  oc_obj:
+    state: absent
+    kind: "{{ item.kind }}"
+    name: "{{ item.name }}"
+    namespace: "{{ osoh_namespace }}"
+  with_items:
+    - { kind: "deploymentconfig", name: "{{ osoh_appname }}" }
+    - { kind: "configmap", name: "{{ osoh_appname }}" }
+    - { kind: "buildconfig", name: "{{ osoh_appname }}" }
+    - { kind: "imagestream", name: "{{ osoh_appname }}" }
+    - { kind: "secret", name: "{{ osoh_appname }}-sshkey" }
+    - { kind: "clusterrolebinding", name: "{{ osoh_appname }}" }
+    - { kind: "serviceaccount", name: "{{ osoh_appname }}" }
+    - { kind: "service", name: "{{ osoh_appname }}" }
+    - { kind: "clusterrole", name: "{{ osoh_appname }}" }
+    - { kind: "template", name: "{{ osoh_appname }}" }
