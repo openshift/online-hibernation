@@ -155,7 +155,12 @@ objects:
   kind: Service
   metadata:
     name: ${NAME}
+    annotations:
+      prometheus.io/port: "8080"
+      prometheus.io/scrape: "true"
   spec:
+    selector:
+      name: ${NAME}
     ports:
     - name: "metrics"
       protocol: TCP
