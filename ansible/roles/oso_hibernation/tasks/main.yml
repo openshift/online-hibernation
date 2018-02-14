@@ -25,13 +25,8 @@
     dest: "{{ osoh_template_path }}"
 
 - name: Create template
-  oc_obj:
-    state: present
-    namespace: "{{ osoh_namespace }}"
-    name: hibernation
-    kind: template
-    files:
-    - "{{ osoh_template_path }}"
+  command: "oc create -n {{ osoh_namespace }} -f {{ osoh_template_path }}"
+  changed_when: false
 
 - name: Join project networks for prometheus and hibernation
   command: oc adm pod-network join-projects --to={{ osoh_metrics_namespace|quote }} {{ osoh_namespace|quote }}
