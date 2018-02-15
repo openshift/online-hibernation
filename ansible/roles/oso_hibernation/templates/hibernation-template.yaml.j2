@@ -37,10 +37,10 @@ parameters:
   value: "{{ osoh_exclude_namespace }}"
 - name: IDLE_SYNC_PERIOD
   description: Interval to sync project status for idler
-  value: "30m"
+  value: "8h"
 - name: IDLE_QUERY_PERIOD
   description: Interval to query project network activity for idler
-  value: "30m"
+  value: "8h"
 - name: IDLE_THRESHOLD
   description: Network activity received (bytes) or less that will result in idling.
   value: "40000"
