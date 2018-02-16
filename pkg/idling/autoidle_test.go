@@ -163,6 +163,38 @@ func TestSync(t *testing.T) {
 			expectedQueueKeys: nil,
 		},
 
+		"Project with len(RunningTimes) == 0 doesn't panic": {
+			idleDryRun: false,
+			netmap:     map[string]float64{"somens2": 1000, "somens1": 1000},
+			exclude:    map[string]bool{"somens2": true},
+			pods: []*corev1.Pod{
+				pod("somepod2", "somens2"),
+			},
+			services: []*corev1.Service{
+				svc("somesvc2", "somens2"),
+			},
+			replicationControllers: []*corev1.ReplicationController{
+				rc("somerc2", "somens2"),
+			},
+			deploymentConfigs: []*appsv1.DeploymentConfig{
+				dc("anotherpoddc", "somens2"),
+			},
+			resources: []*cache.ResourceObject{
+				projectResource("somens2", false),
+				rcResource("somerc2", "somerc2", "somens2", "1", "anotherpoddc", []*cache.RunningTime{
+					runningTime(time.Now().Add(-1*time.Hour),
+						time.Time{}),
+				}),
+				podResource("somepod2", "somepod2", "somens2", "2",
+					resource.MustParse("1G"),
+					[]*cache.RunningTime{},
+					map[string]string{"app": "anotherapp", "deploymentconfig": "anotherpoddc"}),
+				svcResource("5678", "somesvc2", "somens2", "2", map[string]string{"app": "anotherapp", "deploymentconfig": "anotherpoddc"}),
+			},
+			expectedQueueLen:  0,
+			expectedQueueKeys: nil,
+		},
+
 		"Project with pod runningTime < IdleQueryPeriod not added to queue": {
 			idleDryRun: false,
 			netmap:     map[string]float64{"somens2": 1000, "somens1": 1000},

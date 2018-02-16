@@ -229,6 +229,9 @@ func (idler *Idler) checkForScalables(namespace string) (bool, error) {
 				return scalable, nil
 			}
 		}
+		if len(pod.RunningTimes) == 0 {
+			return scalable, nil
+		}
 		if time.Since(pod.RunningTimes[0].Start) < idler.config.IdleQueryPeriod {
 			glog.V(2).Infof("Auto-idler: Ignoring project( %s ), either pod( %s )or controller hasn't been running for complete idling cycle.", namespace, pod.Name)
 			return scalable, nil
