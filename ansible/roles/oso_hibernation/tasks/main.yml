@@ -19,6 +19,15 @@
   register: prometheus_pod_list
   failed_when: prometheus_pod_list.results.results[0]['items'] | count == 0
 
+- name: Check for existing hibernation template
+  oc_obj:
+    state: list
+    kind: template
+    name: "{{ osoh_appname }}"
+    namespace: "{{ osoh_namespace }}"
+  register: osoh_template_list
+  ignore_errors: true
+
 - name: Copy application template
   template:
     src: hibernation-template.yaml.j2
@@ -26,7 +35,14 @@
 
 - name: Create template
   command: "oc create -n {{ osoh_namespace }} -f {{ osoh_template_path }}"
-  changed_when: false
+  when:
+    - osoh_template_list.results.stderr is defined
+    - "'NotFound' in osoh_template_list.results.stderr"
+
+# TODO: Add variables for all parameters in template so we can use oc_process instead of replace
+- name: Update existing template
+  command: "oc replace -n {{ osoh_namespace }} -f {{ osoh_template_path }}"
+  when: osoh_template_list.results.results.stderr is not defined
 
 - name: Join project networks for prometheus and hibernation
   command: oc adm pod-network join-projects --to={{ osoh_metrics_namespace|quote }} {{ osoh_namespace|quote }}
@@ -46,7 +62,6 @@
     clone: no
     accept_hostkey: true
   register: git_sha1_results
-  # Git may not be installed on remote hosts.
   delegate_to: localhost
   changed_when: false
 
@@ -60,3 +75,4 @@
   register: start_build_out
 
 - debug: var=start_build_out
+
