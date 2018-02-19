@@ -19,41 +19,28 @@
   register: prometheus_pod_list
   failed_when: prometheus_pod_list.results.results[0]['items'] | count == 0
 
-- name: Check for existing hibernation template
-  oc_obj:
-    state: list
-    kind: template
-    name: "{{ osoh_appname }}"
-    namespace: "{{ osoh_namespace }}"
-  register: osoh_template_list
-  ignore_errors: true
-
-- name: Copy application template
+- name: Populate application template
   template:
     src: hibernation-template.yaml.j2
     dest: "{{ osoh_template_path }}"
+  register: template_out
 
-- name: Create template
-  command: "oc create -n {{ osoh_namespace }} -f {{ osoh_template_path }}"
-  when:
-    - osoh_template_list.results.stderr is defined
-    - "'NotFound' in osoh_template_list.results.stderr"
-
-# TODO: Add variables for all parameters in template so we can use oc_process instead of replace
-- name: Update existing template
-  command: "oc replace -n {{ osoh_namespace }} -f {{ osoh_template_path }}"
-  when: osoh_template_list.results.results.stderr is not defined
+- name: Determine if template has changed
+  debug:
+    msg: "The file {{ osoh_template_path }} has changed, hibernation template will be updated"
+  when: template_out|changed
 
 - name: Join project networks for prometheus and hibernation
   command: oc adm pod-network join-projects --to={{ osoh_metrics_namespace|quote }} {{ osoh_namespace|quote }}
   changed_when: false
 
-- name: Apply template
+- name: Create template
+  command: "oc apply -f {{ osoh_template_path }} -n {{ osoh_namespace }}"
+  when: template_out|changed
+
+- name: Process template, create pod from template
   shell: "oc process -n {{ osoh_namespace }} hibernation -p GIT_REPO='{{ osoh_git_repo }}' -p GIT_REF='{{ osoh_git_ref }}' -p IDLE_DRYRUN='{{ osoh_idler_dryrun }}' -p SLEEP_DRYRUN='{{ osoh_sleeper_dryrun }}' | oc apply -n {{ osoh_namespace }} -f -"
-  # apply does not indicate if something changed today. Assume changed_when
-  # false and rely on the template update as our best indicator if something
-  # changed.
-  changed_when: false
+  when: template_out|changed
 
 - name: Fetch latest git commit
   git:
