@@ -276,7 +276,13 @@ func AnnotateService(c *cache.Cache, svc *cache.ResourceObject, nowTime time.Tim
 		if err != nil {
 			return err
 		}
-		// Need to delete any previous IdledAtAnnotations to prevent premature unidling
+		// Only add annotations if there are pods associated with the endpoint.
+		// If endpoint subset is nil, that means there is no pod for the endpoint
+		// and the endpoint may already be idled.
+		if newEndpoint.Subsets == nil {
+			return nil
+		}
+		// Need to delete any previous IdledAtAnnotations on services associated with running pods to prevent premature unidling
 		if newEndpoint.Annotations[IdledAtAnnotation] != "" {
 			if project.IsAsleep {
 				glog.V(2).Infof("Force-sleeper: Removing stale idled-at annotation in endpoint( %s ) project( %s )", svc.Name, namespace)
