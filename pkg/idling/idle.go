@@ -279,7 +279,7 @@ func AnnotateService(c *cache.Cache, svc *cache.ResourceObject, nowTime time.Tim
 		// Only add annotations if there are pods associated with the endpoint.
 		// If endpoint subset is nil, that means there is no pod for the endpoint
 		// and the endpoint may already be idled.
-		if newEndpoint.Subsets == nil {
+		if !project.IsAsleep && newEndpoint.Subsets == nil {
 			return nil
 		}
 		// Need to delete any previous IdledAtAnnotations on services associated with running pods to prevent premature unidling
