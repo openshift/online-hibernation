@@ -63,3 +63,9 @@
 
 - debug: var=start_build_out
 
+- name: Check deployment status
+  include_role:
+    name: roles/oso_deployment_status
+  vars:
+    osds_dc_name: "{{ osoh_appname }}"
+    osds_namespace: "{{ osoh_namespace }}"
