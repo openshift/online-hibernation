@@ -16,3 +16,7 @@
     - { kind: "service", name: "{{ osoh_appname }}" }
     - { kind: "clusterrole", name: "{{ osoh_appname }}" }
     - { kind: "template", name: "{{ osoh_appname }}" }
+- name: "Remove {{ osoh_template_path }}"
+  file:
+    path: "{{ osoh_template_path }}"
+    state: absent
