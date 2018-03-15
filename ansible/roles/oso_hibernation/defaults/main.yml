@@ -9,7 +9,8 @@ osoh_git_repo: "https://github.com/openshift/online-hibernation.git"
 osoh_git_ref: "master"
 
 # Location on master where we store the OpenShift app template:
-osoh_template_path: "/etc/openshift-online/templates/hibernation-template.yaml"
+osoh_template_directory: /etc/openshift-online/templates
+osoh_template_path: "{{ osoh_template_directory }}/hibernation-template.yaml"
 osoh_namespace: "openshift-infra"
 osoh_metrics_namespace: "openshift-devops-monitor"
 
