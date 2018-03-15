@@ -19,6 +19,11 @@
   register: prometheus_pod_list
   failed_when: prometheus_pod_list.results.results[0]['items'] | count == 0
 
+- name: Ensure template directory exists
+  file:
+    path: "{{ osoh_template_directory }}"
+    state: directory
+
 - name: Populate application template
   template:
     src: hibernation-template.yaml.j2
