@@ -3,6 +3,7 @@ package idling
 import (
 	"encoding/json"
 	"fmt"
+	"strconv"
 	"time"
 
 	"github.com/openshift/online-hibernation/pkg/cache"
@@ -162,7 +163,6 @@ func ScaleProjectRSs(c *cache.Cache, namespace string) error {
 			ref = metav1.OwnerReference{}
 		}
 		if ref.Kind != "Deployment" {
-			glog.V(2).Infof("GOT HERE!!! %v", ref.Kind)
 			copy, err := cache.Scheme.DeepCopy(thisRS)
 			if err != nil {
 				return err
@@ -277,19 +277,10 @@ func AnnotateService(c *cache.Cache, svc *cache.ResourceObject, nowTime time.Tim
 			return err
 		}
 		// Only add annotations if there are pods associated with the endpoint.
-		// If endpoint subset is nil, that means there is no pod for the endpoint
+		// If endpoint subsets len is 0, that means there is no pod for the endpoint
 		// and the endpoint may already be idled.
-		if !project.IsAsleep && newEndpoint.Subsets == nil {
+		if !project.IsAsleep && len(newEndpoint.Subsets) == 0 {
 			return nil
-		}
-		// Need to delete any previous IdledAtAnnotations on services associated with running pods to prevent premature unidling
-		if newEndpoint.Annotations[IdledAtAnnotation] != "" {
-			if project.IsAsleep {
-				glog.V(2).Infof("Force-sleeper: Removing stale idled-at annotation in endpoint( %s ) project( %s )", svc.Name, namespace)
-			} else {
-				glog.V(2).Infof("Auto-idler: Removing stale idled-at annotation in endpoint( %s ) project( %s )", svc.Name, namespace)
-			}
-			delete(newEndpoint.Annotations, IdledAtAnnotation)
 		}
 		projectPods, err := c.GetProjectPods(namespace)
 		if err != nil {
@@ -320,31 +311,8 @@ func AnnotateService(c *cache.Cache, svc *cache.ResourceObject, nowTime time.Tim
 			return err
 		}
 
-		epList, err := endpointInterface.List(metav1.ListOptions{})
-		if err != nil {
-			return err
-		}
-		for _, ep := range epList.Items {
-			_, targetExists := ep.ObjectMeta.Annotations[UnidleTargetAnnotation]
-			// TODO: It's possible that the unidle target that already exists has a replica that is
-			// not up-to-date.  For instance, a project was *manually* unidled, then scaled.  Then if
-			// the project is auto-idled, the unidle target annotation will hold the replicas of the
-			// original scale, before the project was manually scaled.
-			// For now, skip setting new unidle target when one already exists in an endpoint,
-			// at the risk of keeping an outdated scale, to prevent unidle-target being set to 0. It's
-			// not currently possible to predict if project is currently in the process of becoming idled.
-			// This needs to be fixed in oc idle/web-console code.
-			if targetExists {
-				if !project.IsAsleep {
-					glog.V(2).Infof("Auto-idler: Endpoint( %s )has unidle target annotation, skipping previous scale annotation", ep.Name)
-				} else {
-					glog.V(2).Infof("Force-sleeper: Endpoint( %s )has unidle target annotation, skipping previous scale annotation", ep.Name)
-				}
-			} else {
-				// Add the scalable resources annotation to the service (endpoint)
-				newEndpoint.Annotations[UnidleTargetAnnotation] = string(scaleRefsBytes)
-			}
-		}
+		// Add the scalable resources annotation to the service (endpoint)
+		newEndpoint.Annotations[UnidleTargetAnnotation] = string(scaleRefsBytes)
 		_, err = endpointInterface.Update(newEndpoint)
 		if err != nil {
 			return err
@@ -371,7 +339,6 @@ func AnnotateService(c *cache.Cache, svc *cache.ResourceObject, nowTime time.Tim
 		if err != nil {
 			return err
 		}
-
 		// Annotate the controllers
 		for _, scaleRef := range scaleRefs {
 			ref := corev1.ObjectReference{
@@ -404,7 +371,6 @@ func AnnotateController(c *cache.Cache, ref corev1.ObjectReference, nowTime time
 			return nil, err
 		}
 		newDC := copy.(*appsv1.DeploymentConfig)
-		replicas = controller.Spec.Replicas
 		if newDC.Annotations == nil {
 			newDC.Annotations = make(map[string]string)
 		}
@@ -419,6 +385,17 @@ func AnnotateController(c *cache.Cache, ref corev1.ObjectReference, nowTime time
 					glog.V(2).Infof("Auto-idler: Removing stale idled-at annotation in DC( %s ) project( %s )", newDC.Name, controller.Namespace)
 				}
 				delete(newDC.Annotations, IdledAtAnnotation)
+			}
+			replicas = controller.Spec.Replicas
+			// This check of replicas ensures that a PreviousScaleAnnotation will not be set to 0
+			// Don't replace a non-zero number with '0', this means controller is already idled,
+			// so want to keep the PreviousScaleAnnotation as/is.
+			if replicas == 0 && newDC.Annotations[PreviousScaleAnnotation] != "0" {
+				i, err := strconv.ParseInt(newDC.Annotations[PreviousScaleAnnotation], 10, 32)
+				if err != nil {
+					return nil, err
+				}
+				replicas = int32(i)
 			}
 			newDC.Annotations[PreviousScaleAnnotation] = fmt.Sprintf("%d", replicas)
 		}
@@ -438,7 +415,6 @@ func AnnotateController(c *cache.Cache, ref corev1.ObjectReference, nowTime time
 			return nil, err
 		}
 		newRC := copy.(*corev1.ReplicationController)
-		replicas = *controller.Spec.Replicas
 		if newRC.Annotations == nil {
 			newRC.Annotations = make(map[string]string)
 		}
@@ -453,6 +429,17 @@ func AnnotateController(c *cache.Cache, ref corev1.ObjectReference, nowTime time
 					glog.V(2).Infof("Auto-idler: Removing stale idled-at annotation in RC( %s ) project( %s )", newRC.Name, controller.Namespace)
 				}
 				delete(newRC.Annotations, IdledAtAnnotation)
+			}
+			replicas = *controller.Spec.Replicas
+			// This check of replicas ensures that a PreviousScaleAnnotation will not be set to 0
+			// Don't replace a non-zero number with '0', this means controller is already idled,
+			// so want to keep the PreviousScaleAnnotation as/is.
+			if replicas == 0 && newRC.Annotations[PreviousScaleAnnotation] != "0" {
+				i, err := strconv.ParseInt(newRC.Annotations[PreviousScaleAnnotation], 10, 32)
+				if err != nil {
+					return nil, err
+				}
+				replicas = int32(i)
 			}
 			newRC.Annotations[PreviousScaleAnnotation] = fmt.Sprintf("%d", replicas)
 		}
@@ -473,7 +460,6 @@ func AnnotateController(c *cache.Cache, ref corev1.ObjectReference, nowTime time
 			return nil, err
 		}
 		newRS := copy.(*v1beta1.ReplicaSet)
-		replicas = *controller.Spec.Replicas
 		if newRS.Annotations == nil {
 			newRS.Annotations = make(map[string]string)
 		}
@@ -488,6 +474,17 @@ func AnnotateController(c *cache.Cache, ref corev1.ObjectReference, nowTime time
 					glog.V(2).Infof("Auto-idler: Removing stale idled-at annotation in RS( %s ) project( %s )", newRS.Name, controller.Namespace)
 				}
 				delete(newRS.Annotations, IdledAtAnnotation)
+			}
+			replicas = *controller.Spec.Replicas
+			// This check of replicas ensures that a PreviousScaleAnnotation will not be set to 0
+			// Don't replace a non-zero number with '0', this means controller is already idled,
+			// so want to keep the PreviousScaleAnnotation as/is.
+			if replicas == 0 && newRS.Annotations[PreviousScaleAnnotation] != "0" {
+				i, err := strconv.ParseInt(newRS.Annotations[PreviousScaleAnnotation], 10, 32)
+				if err != nil {
+					return nil, err
+				}
+				replicas = int32(i)
 			}
 			newRS.Annotations[PreviousScaleAnnotation] = fmt.Sprintf("%d", replicas)
 		}
@@ -508,7 +505,6 @@ func AnnotateController(c *cache.Cache, ref corev1.ObjectReference, nowTime time
 			return nil, err
 		}
 		newDep := copy.(*v1beta1.Deployment)
-		replicas = *controller.Spec.Replicas
 		if newDep.Annotations == nil {
 			newDep.Annotations = make(map[string]string)
 		}
@@ -523,6 +519,17 @@ func AnnotateController(c *cache.Cache, ref corev1.ObjectReference, nowTime time
 					glog.V(2).Infof("Auto-idler: Removing stale idled-at annotation in RS( %s ) project( %s )", newDep.Name, controller.Namespace)
 				}
 				delete(newDep.Annotations, IdledAtAnnotation)
+			}
+			replicas = *controller.Spec.Replicas
+			// This check of replicas ensures that a PreviousScaleAnnotation will not be set to 0
+			// Don't replace a non-zero number with '0', this means controller is already idled,
+			// so want to keep the PreviousScaleAnnotation as/is.
+			if replicas == 0 && newDep.Annotations[PreviousScaleAnnotation] != "0" {
+				i, err := strconv.ParseInt(newDep.Annotations[PreviousScaleAnnotation], 10, 32)
+				if err != nil {
+					return nil, err
+				}
+				replicas = int32(i)
 			}
 			newDep.Annotations[PreviousScaleAnnotation] = fmt.Sprintf("%d", replicas)
 		}
