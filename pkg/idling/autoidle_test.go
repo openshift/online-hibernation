@@ -333,6 +333,58 @@ func TestSync(t *testing.T) {
 			expectedQueueLen:  0,
 			expectedQueueKeys: nil,
 		},
+
+		"Netmap len 0, no panic": {
+			idleDryRun: false,
+			netmap:     map[string]float64{},
+			exclude:    map[string]bool{"somens4": true},
+			pods: []*corev1.Pod{
+				pod("somepod1", "somens1"),
+				pod("somepod2", "somens2"),
+			},
+			services: []*corev1.Service{
+				svc("somesvc1", "somens1"),
+				svc("somesvc2", "somens2"),
+			},
+			replicationControllers: []*corev1.ReplicationController{
+				rc("somerc1", "somens1"),
+				rc("somerc2", "somens2"),
+			},
+			deploymentConfigs: []*appsv1.DeploymentConfig{
+				dc("apoddc", "somens1"),
+				dc("anotherpoddc", "somens2"),
+			},
+			resources: []*cache.ResourceObject{
+				projectResource("somens1", false),
+				projectResource("somens2", false),
+				rcResource("somerc1", "somerc1", "somens1", "1", "apoddc", []*cache.RunningTime{
+					runningTime(time.Now().Add(-1*time.Hour),
+						time.Time{}),
+				}),
+				rcResource("somerc2", "somerc2", "somens2", "1", "anotherpoddc", []*cache.RunningTime{
+					runningTime(time.Now().Add(-1*time.Hour),
+						time.Time{}),
+				}),
+				podResource("somepod1", "somepod1", "somens1", "1",
+					resource.MustParse("500M"),
+					[]*cache.RunningTime{
+						runningTime(time.Now().Add(-1*time.Hour),
+							time.Time{}),
+					},
+					map[string]string{"foo": "bar"}),
+				podResource("somepod2", "somepod2", "somens2", "2",
+					resource.MustParse("1G"),
+					[]*cache.RunningTime{
+						runningTime(time.Now().Add(-1*time.Hour),
+							time.Time{}),
+					},
+					map[string]string{"cheese": "sandwich"}),
+				svcResource("1234", "somesvc1", "somens1", "1", map[string]string{"app": "anapp", "deploymentconfig": "apoddc"}),
+				svcResource("5678", "somesvc2", "somens2", "2", map[string]string{"app": "anotherapp", "deploymentconfig": "anotherpoddc"}),
+			},
+			expectedQueueLen:  0,
+			expectedQueueKeys: nil,
+		},
 	}
 
 	for name, test := range tests {

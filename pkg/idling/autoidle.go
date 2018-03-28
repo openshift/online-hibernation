@@ -71,6 +71,7 @@ func (idler *Idler) GetNetworkActivity() map[string]float64 {
 	result, err := queryAPI.Query(context.TODO(), query_string, time.Now())
 	if err != nil {
 		glog.Errorf("Auto-idler: %s", err)
+		return nil
 	}
 	var namespace string
 	netmap := make(map[string]float64)
@@ -132,6 +133,10 @@ func (idler *Idler) sync(netmap map[string]float64) {
 // with a fake prometheus query return
 func (idler *Idler) getNetmapAndSync() {
 	netmap := idler.GetNetworkActivity()
+	if len(netmap) == 0 {
+		glog.V(2).Infof("Auto-idler: Unable to sync projects, no data obtained from prometheus")
+		return
+	}
 	idler.sync(netmap)
 }
 
