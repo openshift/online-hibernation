@@ -22,4 +22,4 @@ osoh_sleeper_dryrun: "{{ osoh_sleeper_dryrun | default('True') }}"
 osoh_uninstall: False
 
 # Namespaces to exclude from hibernation
-osoh_exclude_namespace: "openshift,openshift-devops-monitor,openshift-infra,openshift-image-inspector,openshift-metrics,openshift-node,openshift-web-console,prometheus,default,logging,kube-system,kube-public,kube-service-catalog,management-infra,ops-health-monitoring"
+osoh_exclude_namespace: "openshift,openshift-clam-server,openshift-config,openshift-devops-monitor,openshift-infra,openshift-image-inspector,openshift-metrics,openshift-monitoring,openshift-node,openshift-sdn,openshift-web-console,prometheus,default,logging,kube-system,kube-public,kube-service-catalog,management-infra,ops-health-monitoring"
