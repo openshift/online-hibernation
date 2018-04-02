@@ -31,7 +31,6 @@ func init() {
 func TestSync(t *testing.T) {
 	tests := map[string]struct {
 		idleDryRun             bool
-		exclude                map[string]bool
 		netmap                 map[string]float64
 		deploymentConfigs      []*appsv1.DeploymentConfig
 		pods                   []*corev1.Pod
@@ -44,7 +43,6 @@ func TestSync(t *testing.T) {
 		"Single item added to queue": {
 			idleDryRun: false,
 			netmap:     map[string]float64{"somens1": 1000},
-			exclude:    map[string]bool{"somens3": true},
 			pods: []*corev1.Pod{
 				pod("somepod1", "somens1"),
 			},
@@ -79,7 +77,6 @@ func TestSync(t *testing.T) {
 		"2 items added to queue": {
 			idleDryRun: false,
 			netmap:     map[string]float64{"somens2": 1000, "somens1": 1000},
-			exclude:    map[string]bool{"somens3": true},
 			pods: []*corev1.Pod{
 				pod("somepod1", "somens1"),
 				pod("somepod2", "somens2"),
@@ -128,45 +125,9 @@ func TestSync(t *testing.T) {
 			expectedQueueKeys: []string{"somens1", "somens2"},
 		},
 
-		"Project in excluded namespaces not added to queue": {
-			idleDryRun: false,
-			netmap:     map[string]float64{"somens2": 1000, "somens1": 1000},
-			exclude:    map[string]bool{"somens2": true},
-			pods: []*corev1.Pod{
-				pod("somepod2", "somens2"),
-			},
-			services: []*corev1.Service{
-				svc("somesvc2", "somens2"),
-			},
-			replicationControllers: []*corev1.ReplicationController{
-				rc("somerc2", "somens2"),
-			},
-			deploymentConfigs: []*appsv1.DeploymentConfig{
-				dc("anotherpoddc", "somens2"),
-			},
-			resources: []*cache.ResourceObject{
-				projectResource("somens2", false),
-				rcResource("somerc2", "somerc2", "somens2", "1", "anotherpoddc", []*cache.RunningTime{
-					runningTime(time.Now().Add(-1*time.Hour),
-						time.Time{}),
-				}),
-				podResource("somepod2", "somepod2", "somens2", "2",
-					resource.MustParse("1G"),
-					[]*cache.RunningTime{
-						runningTime(time.Now().Add(-1*time.Hour),
-							time.Time{}),
-					},
-					map[string]string{"app": "anotherapp", "deploymentconfig": "anotherpoddc"}),
-				svcResource("5678", "somesvc2", "somens2", "2", map[string]string{"app": "anotherapp", "deploymentconfig": "anotherpoddc"}),
-			},
-			expectedQueueLen:  0,
-			expectedQueueKeys: nil,
-		},
-
 		"Project with len(RunningTimes) == 0 doesn't panic": {
 			idleDryRun: false,
 			netmap:     map[string]float64{"somens2": 1000, "somens1": 1000},
-			exclude:    map[string]bool{"somens2": true},
 			pods: []*corev1.Pod{
 				pod("somepod2", "somens2"),
 			},
@@ -198,7 +159,6 @@ func TestSync(t *testing.T) {
 		"Project with pod runningTime < IdleQueryPeriod not added to queue": {
 			idleDryRun: false,
 			netmap:     map[string]float64{"somens2": 1000, "somens1": 1000},
-			exclude:    map[string]bool{"foo": true},
 			pods: []*corev1.Pod{
 				pod("somepod2", "somens2"),
 			},
@@ -233,7 +193,6 @@ func TestSync(t *testing.T) {
 		"2 items are scalable, but in IdleDryRun, no projects added to queue": {
 			idleDryRun: true,
 			netmap:     map[string]float64{"somens2": 1000, "somens1": 1000},
-			exclude:    map[string]bool{"somens3": true},
 			pods: []*corev1.Pod{
 				pod("somepod1", "somens1"),
 				pod("somepod2", "somens2"),
@@ -285,7 +244,6 @@ func TestSync(t *testing.T) {
 		"No scalable resources in projects, no project added to queue": {
 			idleDryRun: false,
 			netmap:     map[string]float64{"somens2": 1000, "somens1": 1000},
-			exclude:    map[string]bool{"somens4": true},
 			pods: []*corev1.Pod{
 				pod("somepod1", "somens1"),
 				pod("somepod2", "somens2"),
@@ -337,7 +295,6 @@ func TestSync(t *testing.T) {
 		"Netmap len 0, no panic": {
 			idleDryRun: false,
 			netmap:     map[string]float64{},
-			exclude:    map[string]bool{"somens4": true},
 			pods: []*corev1.Pod{
 				pod("somepod1", "somens1"),
 				pod("somepod2", "somens2"),
@@ -389,9 +346,7 @@ func TestSync(t *testing.T) {
 
 	for name, test := range tests {
 		t.Logf("Testing: %s", name)
-		exclude := test.exclude
 		config := &IdlerConfig{
-			Exclude:         exclude,
 			IdleSyncPeriod:  10 * time.Minute,
 			IdleQueryPeriod: 10 * time.Minute,
 			Threshold:       2000,
@@ -439,7 +394,7 @@ func TestSync(t *testing.T) {
 			return true, list, nil
 		})
 
-		fakeCache := cache.NewCache(fakeOClient, fakeClient, clientConfig, nil, exclude)
+		fakeCache := cache.NewCache(fakeOClient, fakeClient, clientConfig, nil)
 		idler := NewIdler(config, fakeCache)
 		for _, resource := range test.resources {
 			err := idler.resources.Indexer.AddResourceObject(resource)

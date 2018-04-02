@@ -76,7 +76,8 @@ func setupClients(t *testing.T) (*fakekclientset.Clientset, *fakeoclientset.Clie
 						APIVersion: "v1",
 					},
 					ObjectMeta: metav1.ObjectMeta{
-						Name: "somens1",
+						Name:   "somens1",
+						Labels: map[string]string{"openshift.io/hibernate-include": "true"},
 					},
 					Status: corev1.NamespaceStatus{
 						Phase: corev1.NamespaceActive,
@@ -88,7 +89,8 @@ func setupClients(t *testing.T) (*fakekclientset.Clientset, *fakeoclientset.Clie
 						APIVersion: "v1",
 					},
 					ObjectMeta: metav1.ObjectMeta{
-						Name: "somens2",
+						Labels: map[string]string{"openshift.io/hibernate-include": "true"},
+						Name:   "somens2",
 					},
 					Status: corev1.NamespaceStatus{
 						Phase: corev1.NamespaceTerminating,
@@ -100,7 +102,8 @@ func setupClients(t *testing.T) (*fakekclientset.Clientset, *fakeoclientset.Clie
 						APIVersion: "v1",
 					},
 					ObjectMeta: metav1.ObjectMeta{
-						Name: "somens3",
+						Name:   "somens3",
+						Labels: map[string]string{"openshift.io/hibernate-include": "true"},
 					},
 					Status: corev1.NamespaceStatus{
 						Phase: corev1.NamespaceActive,
@@ -359,8 +362,7 @@ func setupClients(t *testing.T) (*fakekclientset.Clientset, *fakeoclientset.Clie
 func TestCacheIsInitiallyPopulated(t *testing.T) {
 	c := make(chan struct{})
 	fakeClient, fakeOClient, _ := setupClients(t)
-	var exclude map[string]bool
-	store := NewResourceStore(exclude, fakeOClient, fakeClient)
+	store := NewResourceStore(fakeOClient, fakeClient)
 
 	svcLW := &kcache.ListWatch{
 		ListFunc: func(options metav1.ListOptions) (runtime.Object, error) {
@@ -401,7 +403,7 @@ func TestReplaceWithMultipleDoesNotConflict(t *testing.T) {
 	c := make(chan struct{})
 	defer close(c)
 	fakeClient, fakeOClient, deltime := setupClients(t)
-	store := NewResourceStore(map[string]bool{}, fakeOClient, fakeClient)
+	store := NewResourceStore(fakeOClient, fakeClient)
 
 	svcLW := &kcache.ListWatch{
 		ListFunc: func(options metav1.ListOptions) (runtime.Object, error) {
@@ -607,4 +609,11 @@ func TestReplaceWithMultipleDoesNotConflict(t *testing.T) {
 		}
 		assert.Equal(t, resource, nses[0], "expected the namespace somens1 to be converted to a resource object properly")
 	}
+	// Expect somens4 to be excluded bc it does not have the OnlineHibernation label
+	nses, err = store.ByIndex("getProject", "somens4")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	assert.Len(t, nses, 0, "expected nil, because somens4 has no openshift.io/hibernate-include label")
 }

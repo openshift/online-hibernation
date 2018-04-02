@@ -3,7 +3,6 @@ package forcesleep
 import (
 	"log"
 	"os"
-	"strings"
 	"testing"
 	"time"
 
@@ -525,20 +524,13 @@ func TestSyncProject(t *testing.T) {
 			return true, list, nil
 		})
 
-		excludeNamespaces := "default,logging,kube-system,openshift-infra"
-		namespaces := strings.Split(excludeNamespaces, ",")
-		exclude := make(map[string]bool)
-		for _, name := range namespaces {
-			exclude[name] = true
-		}
-
 		clientConfig := &restclient.Config{
 			Host: "127.0.0.1",
 			ContentConfig: restclient.ContentConfig{GroupVersion: &corev1.SchemeGroupVersion,
 				NegotiatedSerializer: cache.Codecs},
 		}
 
-		rcache := cache.NewCache(oc, kc, clientConfig, nil, exclude)
+		rcache := cache.NewCache(oc, kc, clientConfig, nil)
 		s := NewSleeper(config, rcache)
 
 		for _, resource := range test.Resources {

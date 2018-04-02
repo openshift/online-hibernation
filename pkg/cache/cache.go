@@ -66,9 +66,9 @@ type Cache struct {
 	stopChan   <-chan struct{}
 }
 
-func NewCache(osClient osclient.Interface, kubeClient kclient.Interface, config *restclient.Config, mapper apimeta.RESTMapper, exclude map[string]bool) *Cache {
+func NewCache(osClient osclient.Interface, kubeClient kclient.Interface, config *restclient.Config, mapper apimeta.RESTMapper) *Cache {
 	return &Cache{
-		Indexer:    NewResourceStore(exclude, osClient, kubeClient),
+		Indexer:    NewResourceStore(osClient, kubeClient),
 		OsClient:   osClient,
 		KubeClient: kubeClient,
 		Config:     config,
