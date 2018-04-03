@@ -18,7 +18,6 @@ const MaxRetries = 2
 
 // IdlerConfig is the configuration for the prometheus client and idler.
 type IdlerConfig struct {
-	Exclude            map[string]bool
 	PrometheusClient   prometheus.Client
 	IdleSyncPeriod     time.Duration
 	IdleQueryPeriod    time.Duration
@@ -89,8 +88,7 @@ func (idler *Idler) GetNetworkActivity() map[string]float64 {
 }
 
 // sync matches projects that should be idled and adds them to the workqueue.
-// If a project has scalable resources, is not in
-// the exclude_namespace list, is in the map of projects below the idling
+// If a project has scalable resources and is in the map of projects below the idling
 // threshold and if the idler is not in DryRun mode, then that project name is
 // added to the queue of projects to be idled.
 func (idler *Idler) sync(netmap map[string]float64) {
@@ -111,20 +109,18 @@ func (idler *Idler) sync(netmap map[string]float64) {
 			glog.V(2).Infof("Auto-idler: Project( %s )sync complete", ns)
 			continue
 		}
-		if !idler.config.Exclude[ns] {
-			nsInMap := false
-			if bytes, ok := netmap[ns]; ok {
-				nsInMap = true
-				if idler.config.IdleDryRun {
-					glog.V(2).Infof("Auto-idler: Project( %s )netrx bytes( %v )below idling threshold, but currently in DryRun mode", ns, bytes)
-				} else {
-					glog.V(2).Infof("Auto-idler: Project( %s )netrx bytes( %v )below idling threshold", ns, bytes)
-					idler.queue.Add(ns)
-				}
+		nsInMap := false
+		if bytes, ok := netmap[ns]; ok {
+			nsInMap = true
+			if idler.config.IdleDryRun {
+				glog.V(2).Infof("Auto-idler: Project( %s )netrx bytes( %v )below idling threshold, but currently in DryRun mode", ns, bytes)
+			} else {
+				glog.V(2).Infof("Auto-idler: Project( %s )netrx bytes( %v )below idling threshold", ns, bytes)
+				idler.queue.Add(ns)
 			}
-			if !nsInMap {
-				glog.V(2).Infof("Auto-idler: Project( %s )sync complete", ns)
-			}
+		}
+		if !nsInMap {
+			glog.V(2).Infof("Auto-idler: Project( %s )sync complete", ns)
 		}
 	}
 }

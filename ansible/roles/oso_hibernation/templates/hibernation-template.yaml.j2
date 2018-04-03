@@ -32,9 +32,6 @@ parameters:
 - name: PROJECT_SLEEP_LENGTH
   description: Length of time to apply force-sleep to projects over quota.
   value: "8h"
-- name: EXCLUDE_NAMESPACES
-  description: Comma-separated list of namespace to exclude in quota enforcement
-  value: "{{ osoh_exclude_namespace }}"
 - name: IDLE_SYNC_PERIOD
   description: Interval to sync project status for idler
   value: "8h"
@@ -257,7 +254,6 @@ objects:
           - --sleep-sync-period=${SLEEP_SYNC_PERIOD}
           - --sleep-duration=${PROJECT_SLEEP_LENGTH}
           - --workers=10
-          - --exclude-namespace=${EXCLUDE_NAMESPACES}
           - --terminating=${TERMINATING_QUOTA}
           - --nonterminating=${NONTERMINATING_QUOTA}
           - --idle-sync-period=${IDLE_SYNC_PERIOD}

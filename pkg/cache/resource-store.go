@@ -21,7 +21,10 @@ import (
 	kcache "k8s.io/client-go/tools/cache"
 )
 
-const LastSleepTimeAnnotation = "openshift.io/last-sleep-time"
+const (
+	LastSleepTimeAnnotation = "openshift.io/last-sleep-time"
+	HibernationLabel        = "openshift.io/hibernate-include"
+)
 
 type ResourceObject struct {
 	Mutex             sync.RWMutex
@@ -45,7 +48,6 @@ type ResourceObject struct {
 type resourceStore struct {
 	mu sync.RWMutex
 	kcache.Indexer
-	Exclude    map[string]bool
 	OsClient   osclient.Interface
 	KubeClient kclient.Interface
 }
@@ -59,7 +61,13 @@ func (s *resourceStore) NewResourceFromInterface(resource interface{}) (*Resourc
 	case *corev1.Service:
 		return s.NewResourceFromService(r), nil
 	case *corev1.Namespace:
-		return s.NewResourceFromProject(r), nil
+		labels := r.GetLabels()
+		if include, ok := labels[HibernationLabel]; ok && include == "true" {
+			return s.NewResourceFromProject(r), nil
+		} else {
+			glog.V(2).Infof("Excluding namespace( %s )from hibernation, label( %s=true )not found.", r.Name, HibernationLabel)
+			return nil, nil
+		}
 	case *v1beta1.ReplicaSet:
 		newResource, err := s.NewResourceFromRS(r)
 		if err != nil {
@@ -77,6 +85,9 @@ func (s *resourceStore) AddOrModify(obj interface{}) error {
 		if err != nil {
 			return err
 		}
+		if resObj == nil {
+			return nil
+		}
 		glog.V(3).Infof("Received ADD/MODIFY for pod: %s\n", resObj.Name)
 		// If the pod is running, make sure it's started in cache
 		// Otherwise, make sure it's stopped
@@ -91,6 +102,9 @@ func (s *resourceStore) AddOrModify(obj interface{}) error {
 		if err != nil {
 			return err
 		}
+		if resObj == nil {
+			return nil
+		}
 		glog.V(3).Infof("Received ADD/MODIFY for RC: %s\n", resObj.Name)
 		// If RC has more than 0 active replicas, make sure it's started in cache
 		if r.Status.Replicas > 0 {
@@ -103,6 +117,9 @@ func (s *resourceStore) AddOrModify(obj interface{}) error {
 		if err != nil {
 			return err
 		}
+		if resObj == nil {
+			return nil
+		}
 		glog.V(3).Infof("Received ADD/MODIFY for RS: %s\n", resObj.Name)
 		// If RS has more than 0 active replicas, make sure it's started in cache
 		if r.Status.Replicas > 0 {
@@ -114,6 +131,9 @@ func (s *resourceStore) AddOrModify(obj interface{}) error {
 		resObj, err := s.NewResourceFromInterface(obj.(*corev1.Service))
 		if err != nil {
 			return err
+		}
+		if resObj == nil {
+			return nil
 		}
 		glog.V(3).Infof("Received ADD/MODIFY for Service: %s\n", resObj.Name)
 		UID := string(resObj.UID)
@@ -137,6 +157,9 @@ func (s *resourceStore) AddOrModify(obj interface{}) error {
 		if err != nil {
 			return err
 		}
+		if resObj == nil {
+			return nil
+		}
 		glog.V(3).Infof("Received ADD/MODIFY for Project: %s\n", r.Name)
 		if r.Status.Phase == corev1.NamespaceActive {
 			_, exists, err := s.GetResourceByKey(r.Name)
@@ -144,10 +167,8 @@ func (s *resourceStore) AddOrModify(obj interface{}) error {
 				glog.Errorf("Error: %v", err)
 			}
 			if !exists {
-				if !s.Exclude[r.Name] {
-					resObj := s.NewResourceFromProject(r)
-					s.Indexer.Add(resObj)
-				}
+				resObj := s.NewResourceFromProject(r)
+				s.Indexer.Add(resObj)
 			}
 		}
 		// Now make sure it was added
@@ -164,7 +185,7 @@ func (s *resourceStore) AddOrModify(obj interface{}) error {
 			resource := res.(*ResourceObject)
 			return s.Indexer.Update(resource)
 		} else {
-			if r.Status.Phase == corev1.NamespaceActive && !s.Exclude[r.Name] {
+			if r.Status.Phase == corev1.NamespaceActive {
 				glog.Errorf("Project not in cache")
 			}
 		}
@@ -182,6 +203,9 @@ func (s *resourceStore) DeleteKapiResource(obj interface{}) error {
 		if err != nil {
 			return err
 		}
+		if resObj == nil {
+			return nil
+		}
 		UID := string(resObj.UID)
 		if s.ResourceInCache(UID) {
 			s.stopResource(resObj)
@@ -191,6 +215,9 @@ func (s *resourceStore) DeleteKapiResource(obj interface{}) error {
 		if err != nil {
 			return err
 		}
+		if resObj == nil {
+			return nil
+		}
 		UID := string(resObj.UID)
 		if s.ResourceInCache(UID) {
 			s.Indexer.Delete(resObj)
@@ -199,6 +226,9 @@ func (s *resourceStore) DeleteKapiResource(obj interface{}) error {
 		resObj, err := s.NewResourceFromInterface(r)
 		if err != nil {
 			return err
+		}
+		if resObj == nil {
+			return nil
 		}
 		// Get all resources from a deleted namespace and remove them from the cache
 		resources, err := s.Indexer.ByIndex("byNamespace", resObj.Name)
@@ -431,7 +461,7 @@ func resourceKey(obj interface{}) (string, error) {
 }
 
 // NewResourceStore creates an Indexer store with the given key function
-func NewResourceStore(exclude map[string]bool, osClient osclient.Interface, kubeClient kclient.Interface) *resourceStore {
+func NewResourceStore(osClient osclient.Interface, kubeClient kclient.Interface) *resourceStore {
 	store := &resourceStore{
 		Indexer: kcache.NewIndexer(resourceKey, kcache.Indexers{
 			"byNamespace":        indexResourceByNamespace,
@@ -439,7 +469,6 @@ func NewResourceStore(exclude map[string]bool, osClient osclient.Interface, kube
 			"getProject":         getProjectResource,
 			"ofKind":             getAllResourcesOfKind,
 		}),
-		Exclude:    exclude,
 		OsClient:   osClient,
 		KubeClient: kubeClient,
 	}

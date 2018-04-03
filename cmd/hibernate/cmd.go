@@ -6,7 +6,6 @@ import (
 	"net/http"
 	"net/http/pprof"
 	"os"
-	"strings"
 	"time"
 
 	osclient "github.com/openshift/client-go/apps/clientset/versioned"
@@ -56,7 +55,7 @@ func main() {
 	log.SetOutput(os.Stdout)
 	var quota, period, sleepSyncPeriod, idleSyncPeriod, idleQueryPeriod, projectSleepPeriod time.Duration
 	var workers, threshold int
-	var cfgFile, excludeNamespaces, termQuota, nontermQuota, prometheusURL, metricsBindAddr string
+	var cfgFile, termQuota, nontermQuota, prometheusURL, metricsBindAddr string
 	var idleDryRun, sleepDryRun, collectRuntime, collectCache, enableProfiling bool
 
 	flag.DurationVar(&quota, "quota", 16*time.Hour, "Maximum quota-hours allowed in period before force sleep")
@@ -67,7 +66,6 @@ func main() {
 
 	flag.IntVarP(&workers, "workers", "w", 10, "Number of workers to process project sync")
 	flag.StringVar(&cfgFile, "config", "", "load configuration from file")
-	flag.StringVar(&excludeNamespaces, "exclude-namespace", "openshift-infra,default,openshift", "Comma-separated list of namespace to exclude in quota enforcement")
 
 	flag.StringVar(&termQuota, "terminating", "", "Memory quota for terminating pods")
 	flag.StringVar(&nontermQuota, "nonterminating", "", "Memory quota for non-terminating pods")
@@ -124,11 +122,6 @@ func main() {
 		glog.Fatalf("Error creating Prometheus client: %s", err)
 	}
 
-	namespaces := strings.Split(excludeNamespaces, ",")
-	exclude := make(map[string]bool)
-	for _, name := range namespaces {
-		exclude[name] = true
-	}
 	c := make(chan struct{})
 
 	// TODO: switch to an actual retrying RESTMapper when someone gets around to writing it
@@ -137,7 +130,7 @@ func main() {
 	restMapper.Reset()
 
 	//Cache is a shared object that both Sleeper and Idler will hold a reference to and interact with
-	cache := cache.NewCache(osClient, kubeClient, restConfig, restMapper, exclude)
+	cache := cache.NewCache(osClient, kubeClient, restConfig, restMapper)
 	cache.Run(c)
 
 	sleeperConfig := &forcesleep.SleeperConfig{
@@ -145,7 +138,6 @@ func main() {
 		Period:             period,
 		SleepSyncPeriod:    sleepSyncPeriod,
 		SyncWorkers:        workers,
-		Exclude:            exclude,
 		ProjectSleepPeriod: projectSleepPeriod,
 		TermQuota:          tQuota,
 		NonTermQuota:       ntQuota,
@@ -187,7 +179,6 @@ func main() {
 	sleeper.Run(c)
 
 	idlerConfig := &idling.IdlerConfig{
-		Exclude:            exclude,
 		PrometheusClient:   prometheusClient,
 		IdleSyncPeriod:     idleSyncPeriod,
 		IdleQueryPeriod:    idleQueryPeriod,
