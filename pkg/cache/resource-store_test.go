@@ -7,6 +7,7 @@ import (
 	"github.com/stretchr/testify/assert"
 
 	fakeoclientset "github.com/openshift/client-go/apps/clientset/versioned/fake"
+	appsv1beta1 "k8s.io/api/apps/v1beta1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/api/extensions/v1beta1"
 	"k8s.io/apimachinery/pkg/api/resource"
@@ -227,6 +228,55 @@ func setupClients(t *testing.T) (*fakekclientset.Clientset, *fakeoclientset.Clie
 		return true, obj, nil
 	})
 
+	fakeClient.AddReactor("list", "statefulsets", func(action ktesting.Action) (handled bool, resp runtime.Object, err error) {
+		obj := &appsv1beta1.StatefulSetList{
+			Items: []appsv1beta1.StatefulSet{
+				{
+					TypeMeta: metav1.TypeMeta{
+						Kind:       "StatefulSet",
+						APIVersion: "v1",
+					},
+					ObjectMeta: metav1.ObjectMeta{
+						Name:              "somess1",
+						Namespace:         "somens5",
+						UID:               "4445",
+						ResourceVersion:   "1",
+						DeletionTimestamp: deltime,
+						Labels:            map[string]string{"somesslabel": "sssomething"},
+					},
+					Spec: appsv1beta1.StatefulSetSpec{
+						Selector: &metav1.LabelSelector{MatchLabels: (map[string]string{"somessselector": "ssblah"})},
+					},
+					Status: appsv1beta1.StatefulSetStatus{
+						Replicas: 1,
+					},
+				},
+				{
+					TypeMeta: metav1.TypeMeta{
+						Kind:       "StatefulSet",
+						APIVersion: "v1",
+					},
+					ObjectMeta: metav1.ObjectMeta{
+						Name:              "somess2",
+						Namespace:         "somens6",
+						UID:               "4446",
+						ResourceVersion:   "1",
+						DeletionTimestamp: deltime,
+						Labels:            map[string]string{"anothersslabel": "ssanother"},
+					},
+					Spec: appsv1beta1.StatefulSetSpec{
+						Selector: &metav1.LabelSelector{MatchLabels: (map[string]string{"anotherssselector": "ssblahblah"})},
+					},
+					Status: appsv1beta1.StatefulSetStatus{
+						Replicas: 1,
+					},
+				},
+			},
+		}
+
+		return true, obj, nil
+	})
+
 	fakeClient.AddReactor("list", "pods", func(action ktesting.Action) (handled bool, resp runtime.Object, err error) {
 		obj := &corev1.PodList{
 			Items: []corev1.Pod{
@@ -429,6 +479,14 @@ func TestReplaceWithMultipleDoesNotConflict(t *testing.T) {
 			return fakeClient.ExtensionsV1beta1().ReplicaSets(corev1.NamespaceAll).Watch(options)
 		},
 	}
+	ssLW := &kcache.ListWatch{
+		ListFunc: func(options metav1.ListOptions) (runtime.Object, error) {
+			return fakeClient.AppsV1beta1().StatefulSets(corev1.NamespaceAll).List(options)
+		},
+		WatchFunc: func(options metav1.ListOptions) (watch.Interface, error) {
+			return fakeClient.AppsV1beta1().StatefulSets(corev1.NamespaceAll).Watch(options)
+		},
+	}
 	podLW := &kcache.ListWatch{
 		ListFunc: func(options metav1.ListOptions) (runtime.Object, error) {
 			return fakeClient.CoreV1().Pods(corev1.NamespaceAll).List(options)
@@ -454,6 +512,8 @@ func TestReplaceWithMultipleDoesNotConflict(t *testing.T) {
 	go rcr.Run(c)
 	rsr := kcache.NewReflector(rsLW, &v1beta1.ReplicaSet{}, store, 0)
 	go rsr.Run(c)
+	ssr := kcache.NewReflector(ssLW, &appsv1beta1.StatefulSet{}, store, 0)
+	go ssr.Run(c)
 	podr := kcache.NewReflector(podLW, &corev1.Pod{}, store, 0)
 	go podr.Run(c)
 	time.Sleep(1 * time.Second)
@@ -539,6 +599,37 @@ func TestReplaceWithMultipleDoesNotConflict(t *testing.T) {
 		assert.Equal(t, resource.DeletionTimestamp, rss[0].(*ResourceObject).DeletionTimestamp, "expected the rs somers1 to be converted to a resource object properly")
 		assert.Equal(t, resource.Selectors, rss[0].(*ResourceObject).Selectors, "expected the rs somers1 to be converted to a resource object properly")
 		assert.Equal(t, resource.Labels, rss[0].(*ResourceObject).Labels, "expected the rs somers1 to be converted to a resource object properly")
+	}
+
+	sss, err := store.ByIndex("byNamespaceAndKind", "somens5/"+SSKind)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if assert.Len(t, sss, 1, "expected to have one ss in namespace somens5") {
+		selector, err := metav1.LabelSelectorAsSelector(&metav1.LabelSelector{MatchLabels: map[string]string{"somessselector": "ssblah"}})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		resource := &ResourceObject{
+			UID:               "4445",
+			Name:              "somess1",
+			Namespace:         "somens5",
+			Kind:              SSKind,
+			ResourceVersion:   "1",
+			DeletionTimestamp: deltime,
+			Selectors:         selector,
+			Labels:            map[string]string{"somesslabel": "sssomething"},
+		}
+		assert.NotNil(t, sss[0].(*ResourceObject).RunningTimes, "expected the ss somess1 to be converted to a resource object properly, found nil RunningTime")
+		assert.Equal(t, resource.UID, sss[0].(*ResourceObject).UID, "expected the ss somess1 to be converted to a resource object properly")
+		assert.Equal(t, resource.Name, sss[0].(*ResourceObject).Name, "expected the ss somess1 to be converted to a resource object properly")
+		assert.Equal(t, resource.Namespace, sss[0].(*ResourceObject).Namespace, "expected the ss somess1 to be converted to a resource object properly")
+		assert.Equal(t, resource.Kind, sss[0].(*ResourceObject).Kind, "expected the ss somess1 to be converted to a resource object properly")
+		assert.Equal(t, resource.ResourceVersion, sss[0].(*ResourceObject).ResourceVersion, "expected the rs somess1 to be converted to a resource object properly")
+		assert.Equal(t, resource.DeletionTimestamp, sss[0].(*ResourceObject).DeletionTimestamp, "expected the rs somess1 to be converted to a resource object properly")
+		assert.Equal(t, resource.Selectors, sss[0].(*ResourceObject).Selectors, "expected the ss somess1 to be converted to a resource object properly")
+		assert.Equal(t, resource.Labels, sss[0].(*ResourceObject).Labels, "expected the ss somess1 to be converted to a resource object properly")
 	}
 
 	pods, err := store.ByIndex("byNamespaceAndKind", "somens1/"+PodKind)

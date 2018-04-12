@@ -307,6 +307,12 @@ func (idler *Idler) autoIdleProjectServices(namespace string) error {
 		return fmt.Errorf("Error scaling ReplicaSets in project %s: %s", namespace, err)
 	}
 
+	glog.V(2).Infof("Auto-idler: Scaling StatefulSets in project %s", namespace)
+	err = ScaleProjectSSs(idler.resources, namespace)
+	if err != nil {
+		return fmt.Errorf("Error scaling StatefulSets in project %s: %s", namespace, err)
+	}
+
 	glog.V(2).Infof("Auto-idler: Deleting pods in project %s", namespace)
 	err = DeleteProjectPods(idler.resources, namespace)
 	if err != nil {

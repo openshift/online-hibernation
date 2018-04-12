@@ -173,6 +173,13 @@ func (s *Sleeper) applyProjectSleep(namespace string, sleepTime, wakeTime time.T
 		glog.Errorf("Force-sleeper: Error scaling ReplicaSets in project( %s ): %s", namespace, err)
 	}
 
+	glog.V(2).Infof("Force-sleeper: Scaling StatefulSets in project( %s )", namespace)
+	err = idling.ScaleProjectSSs(s.resources, namespace)
+	if err != nil {
+		failed = true
+		glog.Errorf("Force-sleeper: Error scaling StatefulSets in project( %s ): %s", namespace, err)
+	}
+
 	glog.V(2).Infof("Force-sleeper: Scaling Deploymentss in project( %s )", namespace)
 	err = idling.ScaleProjectDeployments(s.resources, namespace)
 	if err != nil {

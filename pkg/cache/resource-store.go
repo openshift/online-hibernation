@@ -9,6 +9,7 @@ import (
 
 	osclient "github.com/openshift/client-go/apps/clientset/versioned"
 
+	appsv1beta1 "k8s.io/api/apps/v1beta1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/api/extensions/v1beta1"
 	kerrors "k8s.io/apimachinery/pkg/api/errors"
@@ -74,6 +75,12 @@ func (s *resourceStore) NewResourceFromInterface(resource interface{}) (*Resourc
 			return nil, err
 		}
 		return newResource, nil
+	case *appsv1beta1.StatefulSet:
+		newResource, err := s.NewResourceFromSS(r)
+		if err != nil {
+			return nil, err
+		}
+		return newResource, nil
 	}
 	return nil, fmt.Errorf("unknown resource of type %T", resource)
 }
@@ -121,6 +128,18 @@ func (s *resourceStore) AddOrModify(obj interface{}) error {
 			return nil
 		}
 		glog.V(3).Infof("Received ADD/MODIFY for RS: %s\n", resObj.Name)
+		// If RS has more than 0 active replicas, make sure it's started in cache
+		if r.Status.Replicas > 0 {
+			s.startResource(resObj)
+		} else { // replicas == 0
+			s.stopResource(resObj)
+		}
+	case *appsv1beta1.StatefulSet:
+		resObj, err := s.NewResourceFromInterface(obj.(*appsv1beta1.StatefulSet))
+		if err != nil {
+			return err
+		}
+		glog.V(3).Infof("Received ADD/MODIFY for SS: %s\n", resObj.Name)
 		// If RS has more than 0 active replicas, make sure it's started in cache
 		if r.Status.Replicas > 0 {
 			s.startResource(resObj)
@@ -198,7 +217,7 @@ func (s *resourceStore) AddOrModify(obj interface{}) error {
 func (s *resourceStore) DeleteKapiResource(obj interface{}) error {
 	glog.V(3).Infof("Received DELETE event\n")
 	switch r := obj.(type) {
-	case *corev1.Pod, *corev1.ReplicationController, *v1beta1.ReplicaSet:
+	case *corev1.Pod, *corev1.ReplicationController, *v1beta1.ReplicaSet, *appsv1beta1.StatefulSet:
 		resObj, err := s.NewResourceFromInterface(r)
 		if err != nil {
 			return err
@@ -251,7 +270,7 @@ func (s *resourceStore) Add(obj interface{}) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	switch r := obj.(type) {
-	case *corev1.Namespace, *corev1.Service, *corev1.Pod, *corev1.ReplicationController, *v1beta1.ReplicaSet:
+	case *corev1.Namespace, *corev1.Service, *corev1.Pod, *corev1.ReplicationController, *v1beta1.ReplicaSet, *appsv1beta1.StatefulSet:
 		if err := s.AddOrModify(r); err != nil {
 			return fmt.Errorf("Error: %s", err)
 		}
@@ -265,7 +284,7 @@ func (s *resourceStore) Delete(obj interface{}) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	switch obj.(type) {
-	case *corev1.Namespace, *corev1.Service, *corev1.Pod, *corev1.ReplicationController, *v1beta1.ReplicaSet:
+	case *corev1.Namespace, *corev1.Service, *corev1.Pod, *corev1.ReplicationController, *v1beta1.ReplicaSet, *appsv1beta1.StatefulSet:
 		if err := s.DeleteKapiResource(obj); err != nil {
 			return fmt.Errorf("Error: %s", err)
 		}
@@ -279,7 +298,7 @@ func (s *resourceStore) Update(obj interface{}) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	switch r := obj.(type) {
-	case *corev1.Namespace, *corev1.Service, *corev1.Pod, *corev1.ReplicationController, *v1beta1.ReplicaSet:
+	case *corev1.Namespace, *corev1.Service, *corev1.Pod, *corev1.ReplicationController, *v1beta1.ReplicaSet, *appsv1beta1.StatefulSet:
 		if err := s.AddOrModify(r); err != nil {
 			return fmt.Errorf("Error: %s", err)
 		}
@@ -305,7 +324,7 @@ func (s *resourceStore) DeleteResourceObject(obj *ResourceObject) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	switch obj.Kind {
-	case PodKind, RCKind, ServiceKind, RSKind:
+	case PodKind, RCKind, ServiceKind, RSKind, SSKind:
 		UID := string(obj.UID)
 		if s.ResourceInCache(UID) {
 			// Should this be stopResource?
@@ -357,7 +376,8 @@ func (s *resourceStore) Replace(objs []interface{}, resVer string) error {
 	defer s.mu.Unlock()
 
 	if len(objs) == 0 {
-		return fmt.Errorf("cannot handle situation when replace is called with empty slice")
+		glog.V(3).Infof("replace was called with empty slice")
+		return nil
 	}
 
 	accessor, err := meta.TypeAccessor(objs[0])
@@ -387,7 +407,7 @@ func (s *resourceStore) Replace(objs []interface{}, resVer string) error {
 	s.Indexer.Replace(objsToSave, resVer)
 	for _, obj := range objs {
 		switch r := obj.(type) {
-		case *corev1.Namespace, *corev1.Service, *corev1.Pod, *corev1.ReplicationController, *v1beta1.ReplicaSet:
+		case *corev1.Namespace, *corev1.Service, *corev1.Pod, *corev1.ReplicationController, *v1beta1.ReplicaSet, *appsv1beta1.StatefulSet:
 			if err := s.AddOrModify(r); err != nil {
 				return err
 			}
@@ -705,6 +725,31 @@ func (s *resourceStore) NewResourceFromRS(rs *v1beta1.ReplicaSet) (*ResourceObje
 		resource.DeletionTimestamp = rs.ObjectMeta.DeletionTimestamp.Time
 	}
 	return resource, nil
+}
+
+func (s *resourceStore) NewResourceFromSS(ss *appsv1beta1.StatefulSet) (*ResourceObject, error) {
+	selector, err := metav1.LabelSelectorAsSelector(ss.Spec.Selector)
+	if err != nil {
+		return nil, err
+	}
+	resource := &ResourceObject{
+		UID:             ss.GetUID(),
+		Name:            ss.GetName(),
+		Namespace:       ss.GetNamespace(),
+		Kind:            SSKind,
+		ResourceVersion: ss.GetResourceVersion(),
+		RunningTimes:    make([]*RunningTime, 0),
+		Selectors:       selector,
+		Labels:          ss.GetLabels(),
+	}
+
+	if ss.ObjectMeta.DeletionTimestamp.IsZero() {
+		resource.DeletionTimestamp = time.Time{}
+	} else {
+		resource.DeletionTimestamp = ss.ObjectMeta.DeletionTimestamp.Time
+	}
+	return resource, nil
+
 }
 
 func (s *resourceStore) NewResourceFromService(svc *corev1.Service) *ResourceObject {

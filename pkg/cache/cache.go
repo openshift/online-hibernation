@@ -7,10 +7,9 @@ import (
 	"github.com/openshift/api/apps/v1"
 	osclient "github.com/openshift/client-go/apps/clientset/versioned"
 	appsv1 "github.com/openshift/client-go/apps/clientset/versioned/typed/apps/v1"
-	"k8s.io/api/extensions/v1beta1"
-	extkclientv1beta1 "k8s.io/client-go/kubernetes/typed/extensions/v1beta1"
-
+	appsv1beta1 "k8s.io/api/apps/v1beta1"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/api/extensions/v1beta1"
 	kerrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
@@ -20,7 +19,9 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/watch"
 	kclient "k8s.io/client-go/kubernetes"
+	appskclientv1beta1 "k8s.io/client-go/kubernetes/typed/apps/v1beta1"
 	kclientv1 "k8s.io/client-go/kubernetes/typed/core/v1"
+	extkclientv1beta1 "k8s.io/client-go/kubernetes/typed/extensions/v1beta1"
 	restclient "k8s.io/client-go/rest"
 	kcache "k8s.io/client-go/tools/cache"
 
@@ -42,6 +43,7 @@ const (
 	RCKind                = "ReplicationController"
 	DCKind                = "DeploymentConfig"
 	RSKind                = "ReplicaSet"
+	SSKind                = "StatefulSet"
 	DepKind               = "Deployment"
 	ServiceKind           = "Service"
 	ProjectKind           = "Namespace"
@@ -206,6 +208,8 @@ func GetController(ref corev1.ObjectReference, restMapper apimeta.RESTMapper, re
 		gv = v1.SchemeGroupVersion
 	case DepKind, RSKind:
 		gv = v1beta1.SchemeGroupVersion
+	case SSKind:
+		gv = appsv1beta1.SchemeGroupVersion
 	}
 
 	mapping, err := restMapper.RESTMapping(schema.GroupKind{Group: gv.Group, Kind: ref.Kind})
@@ -238,6 +242,20 @@ func GetController(ref corev1.ObjectReference, restMapper apimeta.RESTMapper, re
 		extkc := extkclientv1beta1.NewForConfigOrDie(&newConfig)
 		extkcclient := extkc.RESTClient()
 		req := extkcclient.Get().
+			NamespaceIfScoped(ref.Namespace, mapping.Scope.Name() == apimeta.RESTScopeNameNamespace).
+			Resource(mapping.Resource).
+			Name(ref.Name).Do()
+
+		result, err := req.Get()
+		if err != nil {
+			return nil, err
+		}
+		return result, nil
+	}
+	if ref.Kind == SSKind {
+		appskc := appskclientv1beta1.NewForConfigOrDie(&newConfig)
+		appskcclient := appskc.RESTClient()
+		req := appskcclient.Get().
 			NamespaceIfScoped(ref.Namespace, mapping.Scope.Name() == apimeta.RESTScopeNameNamespace).
 			Resource(mapping.Resource).
 			Name(ref.Name).Do()
@@ -329,6 +347,17 @@ func (c *Cache) SetUpIndexer() {
 	}
 	rcr := kcache.NewReflector(rcLW, &corev1.ReplicationController{}, c.Indexer, 0)
 	go rcr.Run(c.stopChan)
+
+	ssLW := &kcache.ListWatch{
+		ListFunc: func(options metav1.ListOptions) (runtime.Object, error) {
+			return c.KubeClient.AppsV1beta1().StatefulSets(metav1.NamespaceAll).List(options)
+		},
+		WatchFunc: func(options metav1.ListOptions) (watch.Interface, error) {
+			return c.KubeClient.AppsV1beta1().StatefulSets(metav1.NamespaceAll).Watch(options)
+		},
+	}
+	ssr := kcache.NewReflector(ssLW, &appsv1beta1.StatefulSet{}, c.Indexer, 0)
+	go ssr.Run(c.stopChan)
 
 	rsLW := &kcache.ListWatch{
 		ListFunc: func(options metav1.ListOptions) (runtime.Object, error) {

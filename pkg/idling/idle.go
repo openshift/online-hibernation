@@ -9,6 +9,7 @@ import (
 	"github.com/openshift/online-hibernation/pkg/cache"
 
 	appsv1 "github.com/openshift/api/apps/v1"
+	appsv1beta1 "k8s.io/api/apps/v1beta1"
 	"k8s.io/api/extensions/v1beta1"
 
 	"github.com/golang/glog"
@@ -183,6 +184,35 @@ func ScaleProjectRSs(c *cache.Cache, namespace string) error {
 	}
 	if failed {
 		return fmt.Errorf("Failed to scale all project( %s )RSs", namespace)
+	}
+	return nil
+}
+
+func ScaleProjectSSs(c *cache.Cache, namespace string) error {
+	ssInterface := c.KubeClient.AppsV1beta1().StatefulSets(namespace)
+	ssList, err := ssInterface.List(metav1.ListOptions{})
+	if err != nil {
+		return err
+	}
+
+	failed := false
+	for _, thisSS := range ssList.Items {
+		copy, err := cache.Scheme.DeepCopy(thisSS)
+		if err != nil {
+			return err
+		}
+		newSS := copy.(appsv1beta1.StatefulSet)
+		newSS.Spec.Replicas = int32Ptr(0)
+		_, err = ssInterface.Update(&newSS)
+		if err != nil {
+			if !kerrors.IsNotFound(err) {
+				glog.Errorf("Project( %s) SS( %s ): %s", namespace, thisSS.Name, err)
+				failed = true
+			}
+		}
+	}
+	if failed {
+		return fmt.Errorf("Failed to scale all project( %s )SSs", namespace)
 	}
 	return nil
 }
@@ -535,6 +565,41 @@ func AnnotateController(c *cache.Cache, ref corev1.ObjectReference, nowTime time
 		}
 
 		_, err = depInterface.Update(newDep)
+		if err != nil {
+			if kerrors.IsNotFound(err) {
+				return nil, nil
+			} else {
+				return nil, err
+			}
+		}
+
+	case *appsv1beta1.StatefulSet:
+		ssetInterface := c.KubeClient.AppsV1beta1().StatefulSets(controller.Namespace)
+		copy, err := cache.Scheme.DeepCopy(controller)
+		if err != nil {
+			return nil, err
+		}
+		newSet := copy.(*appsv1beta1.StatefulSet)
+		replicas = *controller.Spec.Replicas
+		if newSet.Annotations == nil {
+			newSet.Annotations = make(map[string]string)
+		}
+		switch annotation {
+		case IdledAtAnnotation:
+			newSet.Annotations[IdledAtAnnotation] = nowTime.Format(time.RFC3339)
+		case PreviousScaleAnnotation:
+			if newSet.Annotations[IdledAtAnnotation] != "" {
+				if isAsleep {
+					glog.V(2).Infof("Force-sleeper: Removing stale idled-at annotation in StatefulSet( %s ) project( %s )", newSet.Name, controller.Namespace)
+				} else {
+					glog.V(2).Infof("Auto-idler: Removing stale idled-at annotation in StatefulSet( %s ) project( %s )", newSet.Name, controller.Namespace)
+				}
+				delete(newSet.Annotations, IdledAtAnnotation)
+			}
+			newSet.Annotations[PreviousScaleAnnotation] = fmt.Sprintf("%d", replicas)
+		}
+
+		_, err = ssetInterface.Update(newSet)
 		if err != nil {
 			if kerrors.IsNotFound(err) {
 				return nil, nil
