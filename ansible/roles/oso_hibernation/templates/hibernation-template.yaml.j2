@@ -93,6 +93,9 @@ objects:
     - namespaces
     - pods
     - replicationcontrollers
+    - daemonsets
+    - statefulsets
+    - replicasets
     - deploymentconfigs
     - resourcequotas
     - services
@@ -197,7 +200,7 @@ objects:
       dockerStrategy:
         from:
           kind: DockerImage
-          name: golang:1.7
+          name: golang:1.9
     output:
       to:
         kind: ImageStreamTag

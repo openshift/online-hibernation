@@ -7,12 +7,8 @@ ARCH?=amd64
 OUT_DIR?=./_output
 
 TAG ?= openshift/online-hibernation
-TARGET ?= prod
 
 DOCKERFILE := Dockerfile
-ifeq ($(TARGET),dev)
-DOCKERFILE := Dockerfile.local
-endif
 
 # Builds and installs the hibernation binary.
 build: check-gopath

@@ -113,6 +113,7 @@ func TestSyncProject(t *testing.T) {
 			DeploymentConfigs: []*appsv1.DeploymentConfig{
 				dc("dc1", "test"),
 			},
+			// TODO: CONVERT THIS INFO INTO ANNOTATIONS
 			Resources: []*cache.ResourceObject{
 				projectResource("test", true, time.Now().Add(-4*time.Hour)),
 				rcResource("rc1", "rc1", "test", "1", "dc1", []*cache.RunningTime{
@@ -148,6 +149,7 @@ func TestSyncProject(t *testing.T) {
 			DeploymentConfigs: []*appsv1.DeploymentConfig{
 				dc("dc1", "test"),
 			},
+			// TODO: CONVERT THIS INFO INTO ANNOTATIONS
 			Resources: []*cache.ResourceObject{
 				projectResource("test", false, time.Time{}),
 				rcResource("rc1", "rc1", "test", "1", "dc1", []*cache.RunningTime{
@@ -183,6 +185,7 @@ func TestSyncProject(t *testing.T) {
 			DeploymentConfigs: []*appsv1.DeploymentConfig{
 				dc("dc1", "test"),
 			},
+			// TODO: CONVERT THIS INFO INTO ANNOTATIONS
 			Resources: []*cache.ResourceObject{
 				projectResource("test", true, time.Now().Add(-8*time.Hour)),
 				rcResource("rc1", "rc1", "test", "1", "dc1", []*cache.RunningTime{
@@ -217,6 +220,7 @@ func TestSyncProject(t *testing.T) {
 			DeploymentConfigs: []*appsv1.DeploymentConfig{
 				dc("dc1", "test"),
 			},
+			// TODO: CONVERT THIS INFO INTO ANNOTATIONS
 			Resources: []*cache.ResourceObject{
 				projectResource("test", true, time.Now().Add(-4*time.Hour)),
 				rcResource("rc1", "rc1", "test", "1", "dc1", []*cache.RunningTime{
@@ -256,6 +260,7 @@ func TestSyncProject(t *testing.T) {
 			DeploymentConfigs: []*appsv1.DeploymentConfig{
 				dc("dc1", "test"),
 			},
+			// TODO: CONVERT THIS INFO INTO ANNOTATIONS
 			Resources: []*cache.ResourceObject{
 				projectResource("test", false, time.Time{}),
 				rcResource("rc1", "rc1", "test", "1", "dc1", []*cache.RunningTime{
@@ -308,6 +313,7 @@ func TestSyncProject(t *testing.T) {
 			DeploymentConfigs: []*appsv1.DeploymentConfig{
 				dc("dc1", "test"),
 			},
+			// TODO: CONVERT THIS INFO INTO ANNOTATIONS
 			Resources: []*cache.ResourceObject{
 				projectResource("test", false, time.Time{}),
 				rcResource("rc1", "rc1", "test", "1", "dc1", []*cache.RunningTime{
@@ -338,6 +344,7 @@ func TestSyncProject(t *testing.T) {
 			DeploymentConfigs: []*appsv1.DeploymentConfig{
 				dc("dc1", "test"),
 			},
+			// TODO: CONVERT THIS INFO INTO ANNOTATIONS
 			Resources: []*cache.ResourceObject{
 				projectResource("test", false, time.Time{}),
 				rcResource("rc1", "rc1", "test", "1", "dc1", []*cache.RunningTime{
@@ -369,6 +376,7 @@ func TestSyncProject(t *testing.T) {
 			DeploymentConfigs: []*appsv1.DeploymentConfig{
 				dc("dc1", "test"),
 			},
+			// TODO: CONVERT THIS INFO INTO ANNOTATIONS
 			Resources: []*cache.ResourceObject{
 				projectResource("test", false, time.Time{}),
 				rcResource("rc1", "rc1", "test", "1", "dc1", []*cache.RunningTime{
@@ -419,6 +427,7 @@ func TestSyncProject(t *testing.T) {
 			DeploymentConfigs: []*appsv1.DeploymentConfig{
 				dc("dc1", "test"),
 			},
+			// TODO: CONVERT THIS INFO INTO ANNOTATIONS
 			Resources: []*cache.ResourceObject{
 				projectResource("test", false, time.Time{}),
 				rcResource("rc1", "rc1", "test", "1", "dc1", []*cache.RunningTime{
@@ -529,22 +538,16 @@ func TestSyncProject(t *testing.T) {
 			ContentConfig: restclient.ContentConfig{GroupVersion: &corev1.SchemeGroupVersion,
 				NegotiatedSerializer: cache.Codecs},
 		}
-
-		rcache := cache.NewCache(oc, kc, clientConfig, nil)
+		// TODO FIX THIS...
+		rcache := cache.NewResourceStore(oc, kc, clientConfig, nil)
 		s := NewSleeper(config, rcache)
 
-		for _, resource := range test.Resources {
-			err := s.resources.Indexer.AddResourceObject(resource)
-			if err != nil {
-				t.Logf("Error: %s", err)
-			}
-		}
-		projects, err := s.resources.Indexer.ByIndex("ofKind", cache.ProjectKind)
+		projects, err := s.resourceStore.ProjectList.List(labels.Everything())
 		if err != nil {
 			t.Logf("Error: %s", err)
 		}
 		for _, project := range projects {
-			s.syncProject(project.(*cache.ResourceObject).Name)
+			s.syncProject(project)
 		}
 
 		// Test kubeClient actions
@@ -840,42 +843,6 @@ func quota(name, namespace, memory, pods string) *corev1.ResourceQuota {
 				corev1.ResourcePods:   resource.MustParse(pods),
 			}),
 		},
-	}
-}
-
-func podResource(uid, name, namespace, resourceVersion string, request resource.Quantity, rt []*cache.RunningTime) *cache.ResourceObject {
-	return &cache.ResourceObject{
-		UID:             types.UID(uid),
-		Name:            name,
-		Namespace:       namespace,
-		Kind:            cache.PodKind,
-		ResourceVersion: resourceVersion,
-		MemoryRequested: request,
-		RunningTimes:    rt,
-		Terminating:     false,
-	}
-}
-
-func rcResource(uid, name, namespace, resourceVersion, dc string, rt []*cache.RunningTime) *cache.ResourceObject {
-	return &cache.ResourceObject{
-		UID:             types.UID(uid),
-		Name:            name,
-		Namespace:       namespace,
-		Kind:            cache.RCKind,
-		ResourceVersion: resourceVersion,
-		RunningTimes:    rt,
-	}
-}
-
-func projectResource(name string, isAsleep bool, lastSleep time.Time) *cache.ResourceObject {
-	return &cache.ResourceObject{
-		UID:              types.UID(name),
-		Name:             name,
-		Namespace:        name,
-		Kind:             cache.ProjectKind,
-		LastSleepTime:    lastSleep,
-		ProjectSortIndex: 0.0,
-		IsAsleep:         isAsleep,
 	}
 }
 

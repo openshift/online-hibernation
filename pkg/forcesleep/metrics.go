@@ -7,6 +7,7 @@ import (
 	"github.com/golang/glog"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
+	"k8s.io/apimachinery/pkg/labels"
 )
 
 type MetricsServer struct {
@@ -70,8 +71,13 @@ func (c *SizeCollector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- CacheSizeMetric
 }
 
+// TODO: Fix size here...I have no idea what this should be
 func (c *SizeCollector) Collect(ch chan<- prometheus.Metric) {
-	size := float64(len(c.controller.resources.Indexer.ListKeys()))
+	projlist, err := c.controller.resourceStore.ProjectList.List(labels.Everything())
+	if err != nil {
+		glog.Errorf("Error: %s", err)
+	}
+	size := float64(len(projlist) * 10)
 	ch <- prometheus.MustNewConstMetric(
 		CacheSizeMetric,
 		prometheus.GaugeValue,

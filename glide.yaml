@@ -1,18 +1,30 @@
 package: github.com/openshift/online-hibernation
 import:
+- package: github.com/golang/glog
+  version: 44145f04b68cf362d9c4df2182967c2275eaefed
+- package: github.com/stretchr/testify
+  version: 12b6f73e6084dad08a7c6e575284b177ecafbc71
+  subpackages:
+  - assert
 - package: github.com/openshift/api
-  version: release-3.8
+  version: release-3.9
 - package: github.com/openshift/client-go
-  version: release-3.8
+  version: release-3.9
 - package: k8s.io/api
-  version: release-1.8
+  version: release-1.9
 - package: k8s.io/apimachinery
-  version: release-1.8
+  version: release-1.9
 - package: k8s.io/client-go
-  version: release-5.0
+  version: release-6.0
 - package: github.com/prometheus/client_golang
   version: 6373fd93345740fc045eab648524bcbb65c3e690
   subpackages:
   - prometheus
 - package: github.com/spf13/pflag
   version: ^1.0.0
+- package: github.com/openshift/service-idler
+  version: master
+  subpackages:
+  - pkg/apis
+  - pkg/client
+ 
