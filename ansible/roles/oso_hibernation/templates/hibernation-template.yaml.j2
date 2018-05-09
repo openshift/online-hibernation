@@ -89,10 +89,21 @@ objects:
     name: ${NAME}
   rules:
   - resources:
+    - idlers
+    apiGroups:
+    - idling.openshift.io
+    verbs:
+    - get
+    - create
+    - update
+  - resources:
     - projects
     - namespaces
     - pods
     - replicationcontrollers
+    - daemonsets
+    - statefulsets
+    - replicasets
     - deploymentconfigs
     - resourcequotas
     - services
@@ -197,7 +208,7 @@ objects:
       dockerStrategy:
         from:
           kind: DockerImage
-          name: golang:1.7
+          name: golang:1.9
     output:
       to:
         kind: ImageStreamTag

@@ -1,7 +1,7 @@
 # OpenShift Online Hibernation Controller
 
 #FROM rhel7.2:7.2-released
-FROM golang:1.7
+FROM golang:1.9
 
 ENV PATH=/go/bin:$PATH \
     GOPATH=/go
