@@ -81,14 +81,27 @@ parameters:
 objects:
 
 # A role for hibernation
-- apiVersion: v1
+- apiVersion: rbac.authorization.k8s.io/v1 
   kind: ClusterRole
   metadata:
     annotations:
       authorization.openshift.io/system-only: "true"
     name: ${NAME}
   rules:
-  - resources:
+  - apiGroups:
+    - idling.openshift.io
+    resources:
+    - idlers
+    verbs:
+    - watch
+    - get
+    - list
+    - create
+    - update
+    - delete
+  - apiGroups:
+    - ""
+    resources:
     - projects
     - namespaces
     - pods
@@ -105,7 +118,6 @@ objects:
     - update
     - delete
   - apiGroups:
-    - ""
     - apps.openshift.io
     resources:
     - deploymentconfigs
@@ -197,7 +209,7 @@ objects:
       dockerStrategy:
         from:
           kind: DockerImage
-          name: golang:1.7
+          name: golang:1.9
     output:
       to:
         kind: ImageStreamTag

@@ -8,39 +8,68 @@ import (
 	"os"
 	"time"
 
-	osclient "github.com/openshift/client-go/apps/clientset/versioned"
+	"github.com/openshift/online-hibernation/pkg/autoidling"
 	"github.com/openshift/online-hibernation/pkg/cache"
 	"github.com/openshift/online-hibernation/pkg/forcesleep"
-	"github.com/openshift/online-hibernation/pkg/idling"
+
 	"github.com/prometheus/client_golang/api/prometheus"
-	flag "github.com/spf13/pflag"
-	"k8s.io/apimachinery/pkg/api/resource"
-	serializer "k8s.io/apimachinery/pkg/runtime/serializer"
-	"k8s.io/client-go/discovery"
-	discocache "k8s.io/client-go/discovery/cached" // Saturday Night Fever
 
 	"github.com/golang/glog"
+
+	flag "github.com/spf13/pflag"
+
+	iclient "github.com/openshift/service-idler/pkg/client/clientset/versioned/typed/idling/v1alpha2"
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
+	"k8s.io/apimachinery/pkg/api/resource"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	utilwait "k8s.io/apimachinery/pkg/util/wait"
+	"k8s.io/client-go/discovery"
+	discocache "k8s.io/client-go/discovery/cached"
+	"k8s.io/client-go/dynamic"
+	"k8s.io/client-go/informers"
+	informerscorev1 "k8s.io/client-go/informers/core/v1"
 	kclient "k8s.io/client-go/kubernetes"
 	restclient "k8s.io/client-go/rest"
+	"k8s.io/client-go/scale"
+	kcache "k8s.io/client-go/tools/cache"
 )
 
-func createClients() (*restclient.Config, kclient.Interface, error) {
+func createClients() (*restclient.Config, kclient.Interface, dynamic.ClientPool, iclient.IdlersGetter, scale.ScaleKindResolver, error) {
 	return CreateClientsForConfig()
+}
+
+func setHibernationLabelSelector(options *metav1.ListOptions) {
+	selectormap := map[string]string{cache.HibernationLabel: "true"}
+	selector, _ := metav1.LabelSelectorAsSelector(&metav1.LabelSelector{MatchLabels: selectormap})
+	labelselector := selector.String()
+	options.LabelSelector = labelselector
 }
 
 // CreateClientsForConfig creates and returns OpenShift and Kubernetes clients (as well as other useful
 // client objects) for the given client config.
-func CreateClientsForConfig() (*restclient.Config, kclient.Interface, error) {
+func CreateClientsForConfig() (*restclient.Config, kclient.Interface, dynamic.ClientPool, iclient.IdlersGetter, scale.ScaleKindResolver, error) {
 
 	clientConfig, err := restclient.InClusterConfig()
 	if err != nil {
 		glog.V(1).Infof("Error creating in-cluster config: %s", err)
 	}
 
-	clientConfig.NegotiatedSerializer = serializer.DirectCodecFactory{CodecFactory: cache.Codecs}
 	kc := kclient.NewForConfigOrDie(clientConfig)
-	return clientConfig, kc, err
+	ic := iclient.NewForConfigOrDie(clientConfig)
+	cachedDiscovery := discocache.NewMemCacheClient(kc.Discovery())
+	restMapper := discovery.NewDeferredDiscoveryRESTMapper(cachedDiscovery, apimeta.InterfacesForUnstructured)
+	restMapper.Reset()
+	discoveryClient, err := discovery.NewDiscoveryClientForConfig(clientConfig)
+	if err != nil {
+		return nil, nil, nil, nil, nil, err
+	}
+
+	dynamicClientPool := dynamic.NewClientPool(clientConfig, restMapper, dynamic.LegacyAPIPathResolverFunc)
+	// we don't use cached discovery because DiscoveryScaleKindResolver does its own caching,
+	// so we want to re-fetch every time when we actually ask for it
+	scaleKindResolver := scale.NewDiscoveryScaleKindResolver(discoveryClient)
+
+	return clientConfig, kc, dynamicClientPool, ic, scaleKindResolver, err
 }
 
 func setupPprof(mux *http.ServeMux) {
@@ -97,8 +126,7 @@ func main() {
 	}
 
 	//Set up clients
-	restConfig, kubeClient, err := createClients()
-	osClient := osclient.NewForConfigOrDie(restConfig)
+	restConfig, kubeClient, dynamicClientPool, idlersClient, scaleKindResolver, err := createClients()
 	var prometheusClient prometheus.Client
 
 	// @DirectXMan12 should be credited here for helping with the promCfg
@@ -124,14 +152,10 @@ func main() {
 
 	c := make(chan struct{})
 
-	// TODO: switch to an actual retrying RESTMapper when someone gets around to writing it
-	cachedDiscovery := discocache.NewMemCacheClient(kubeClient.Discovery())
-	restMapper := discovery.NewDeferredDiscoveryRESTMapper(cachedDiscovery, apimeta.InterfacesForUnstructured)
-	restMapper.Reset()
-
-	//Cache is a shared object that both Sleeper and Idler will hold a reference to and interact with
-	cache := cache.NewCache(osClient, kubeClient, restConfig, restMapper)
-	cache.Run(c)
+	// TODO: is 2*time.Hour reasonable here??
+	informerFactory := informers.NewSharedInformerFactory(kubeClient, 2*time.Hour)
+	namespaceInformer := informerscorev1.NewFilteredNamespaceInformer(kubeClient, time.Minute, kcache.Indexers{kcache.NamespaceIndex: kcache.MetaNamespaceIndexFunc}, setHibernationLabelSelector)
+	resourceStore := cache.NewResourceStore(kubeClient, dynamicClientPool, idlersClient, scaleKindResolver, informerFactory, namespaceInformer)
 
 	sleeperConfig := &forcesleep.SleeperConfig{
 		Quota:              quota,
@@ -142,10 +166,9 @@ func main() {
 		TermQuota:          tQuota,
 		NonTermQuota:       ntQuota,
 		DryRun:             sleepDryRun,
-		QuotaClient:        kubeClient.CoreV1(),
 	}
 
-	sleeper := forcesleep.NewSleeper(sleeperConfig, cache)
+	sleeper := forcesleep.NewSleeper(sleeperConfig, resourceStore)
 
 	// Spawn metrics server and pprof endpoints
 	go func() {
@@ -178,17 +201,19 @@ func main() {
 
 	sleeper.Run(c)
 
-	idlerConfig := &idling.IdlerConfig{
-		PrometheusClient:   prometheusClient,
-		IdleSyncPeriod:     idleSyncPeriod,
-		IdleQueryPeriod:    idleQueryPeriod,
-		SyncWorkers:        workers,
-		Threshold:          threshold,
-		IdleDryRun:         idleDryRun,
-		ProjectSleepPeriod: projectSleepPeriod,
+	informerFactory.Start(utilwait.NeverStop)
+	go namespaceInformer.Run(utilwait.NeverStop)
+
+	autoIdlerConfig := &autoidling.AutoIdlerConfig{
+		PrometheusClient: prometheusClient,
+		IdleSyncPeriod:   idleSyncPeriod,
+		IdleQueryPeriod:  idleQueryPeriod,
+		SyncWorkers:      workers,
+		Threshold:        threshold,
+		IdleDryRun:       idleDryRun,
 	}
 
-	idler := idling.NewIdler(idlerConfig, cache)
+	idler := autoidling.NewAutoIdler(autoIdlerConfig, resourceStore)
 	idler.Run(c)
 	<-c
 }
