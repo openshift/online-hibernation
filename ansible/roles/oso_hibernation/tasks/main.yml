@@ -77,17 +77,14 @@
   register: deployment_status
   ignore_errors: True
 
-- debug:
-    var: deployment_status
+- name: Roll out latest deployment, if needed
+  command: oc rollout latest "{{ osoh_appname }}" -n  "{{ osoh_namespace }}"
+  when: deployment_status|failed
 
-#- name: Roll out latest deployment, if needed
-#  command: oc rollout latest "{{ osoh_appname }}" -n  "{{ osoh_namespace }}"
-#  when: deployment_status.rc != 0
-#
-#- name: Check deployment status
-#  include_role:
-#    name: roles/oso_deployment_status
-#  vars:
-#    osds_dc_name: "{{ osoh_appname }}"
-#    osds_namespace: "{{ osoh_namespace }}"
-#
+- name: Check deployment status
+  include_role:
+    name: roles/oso_deployment_status
+  vars:
+    osds_dc_name: "{{ osoh_appname }}"
+    osds_namespace: "{{ osoh_namespace }}"
+
