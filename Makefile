@@ -7,12 +7,8 @@ ARCH?=amd64
 OUT_DIR?=./_output
 
 TAG ?= openshift/online-hibernation
-TARGET ?= prod
 
 DOCKERFILE := Dockerfile
-ifeq ($(TARGET),dev)
-DOCKERFILE := Dockerfile.local
-endif
 
 # Builds and installs the hibernation binary.
 build: check-gopath
@@ -29,7 +25,7 @@ build: check-gopath
 #   make test-unit TESTFLAGS="-run TestSomething"
 test-unit:
 	go test -v $(TESTFLAGS) \
-		github.com/openshift/online-hibernation/pkg/cache/... github.com/openshift/online-hibernation/pkg/forcesleep/... github.com/openshift/online-hibernation/pkg/idling/...
+		github.com/openshift/online-hibernation/pkg/cache/... github.com/openshift/online-hibernation/pkg/forcesleep/... github.com/openshift/online-hibernation/pkg/autoidling/...
 .PHONY: test-unit
 
 
